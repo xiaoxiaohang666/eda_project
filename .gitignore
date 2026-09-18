@@ -15,6 +15,12 @@ Thumbs.db
 __pycache__/
 *.py[cod]
 build/
+build*/
 dist/
 out/
+output/
 *.log
+
+# 评测二进制与大动态库
+evaluator/*.so*
+evaluator/__pycache__/
