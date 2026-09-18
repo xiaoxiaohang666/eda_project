@@ -20,17 +20,13 @@ endif()
 
 # 编译选项与优化标志
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    add_compile_options(
-        -Wall
-        -Wextra
-        -pedantic
-        $<$<CONFIG:Release>:-O3 -march=native -DNDEBUG>
-        $<$<CONFIG:Debug>:-O0 -g -fsanitize=address,undefined>
-    )
-    # 若在 Debug 模式启用 AddressSanitizer，链接时也需加上
-    add_link_options(
-        $<$<CONFIG:Debug>:-fsanitize=address,undefined>
-    )
+    add_compile_options(-Wall -Wextra -pedantic)
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+        add_compile_options(-O0 -g -fsanitize=address -fsanitize=undefined)
+        add_link_options(-fsanitize=address -fsanitize=undefined)
+    else()
+        add_compile_options(-O3 -march=native -DNDEBUG)
+    endif()
 endif()
 
 # 查找常用线程库
