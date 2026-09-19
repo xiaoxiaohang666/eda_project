@@ -2,7 +2,7 @@
 #include "parser/lef_parser.hpp"
 #include "parser/def_parser.hpp"
 #include "parser/thermal_parser.hpp"
-#include "router/router.hpp"
+#include "router/baseline_router.hpp"
 
 #include <iostream>
 #include <string>
@@ -11,7 +11,7 @@
 
 void print_banner() {
     std::cout << "===============================================================\n";
-    std::cout << "       3D IC Multi-objective Global Routing Optimization       \n";
+    std::cout << "                 3D IC Global Routing Baseline                 \n";
     std::cout << "  2026 EDA Elite Challenge - Zhuhai Silicon Core Technology    \n";
     std::cout << "===============================================================\n";
 }
@@ -24,7 +24,6 @@ void print_usage(const char* prog) {
     std::cout << "  --lefs <file>          : 金属层及器件工艺 LEF 文件路径 (可多次指定)\n";
     std::cout << "  --thermal-json <file>  : 稳态温度场分布 JSON 文件路径\n";
     std::cout << "  -o, --output <file>    : 导出的 ISPD 18/19 标准 Route Guide 路径\n";
-    std::cout << "  --threads <num>        : 多核并行计算线程数 (默认按硬件并发)\n";
     std::cout << "===============================================================\n";
 }
 
@@ -33,7 +32,7 @@ int main(int argc, char* argv[]) {
 
     if (argc < 2) {
         print_usage(argv[0]);
-        return 0;
+        return 1;
     }
 
     std::string def_file;
@@ -43,26 +42,28 @@ int main(int argc, char* argv[]) {
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
-        if (arg == "--input-def" && i + 1 < argc) {
-            def_file = argv[++i];
-        } else if (arg == "--lefs" && i + 1 < argc) {
-            lef_files.push_back(argv[++i]);
-        } else if (arg == "--thermal-json" && i + 1 < argc) {
-            thermal_file = argv[++i];
-        } else if ((arg == "-o" || arg == "--output") && i + 1 < argc) {
-            output_file = argv[++i];
-        } else if (arg == "-h" || arg == "--help") {
+        if (arg == "-h" || arg == "--help") {
             print_usage(argv[0]);
             return 0;
-        } else if (arg.rfind(".def") != std::string::npos && def_file.empty()) {
-            def_file = arg;
-        } else if (arg.rfind(".lef") != std::string::npos) {
-            lef_files.push_back(arg);
         }
+        if (arg != "--input-def" && arg != "--lefs" &&
+            arg != "--thermal-json" && arg != "-o" && arg != "--output") {
+            std::cerr << "[ERROR] 未知参数: " << arg << "\n";
+            return 1;
+        }
+        if (i + 1 >= argc) {
+            std::cerr << "[ERROR] 参数缺少文件路径: " << arg << "\n";
+            return 1;
+        }
+        const std::string value = argv[++i];
+        if (arg == "--input-def") def_file = value;
+        else if (arg == "--lefs") lef_files.push_back(value);
+        else if (arg == "--thermal-json") thermal_file = value;
+        else output_file = value;
     }
 
-    if (def_file.empty() || lef_files.empty()) {
-        std::cerr << "[ERROR] 缺少必要的输入文件 (--input-def 与 --lefs)\n";
+    if (def_file.empty() || lef_files.empty() || thermal_file.empty()) {
+        std::cerr << "[ERROR] 缺少必要输入 (--input-def、--lefs、--thermal-json)\n";
         print_usage(argv[0]);
         return 1;
     }
@@ -93,12 +94,16 @@ int main(int argc, char* argv[]) {
     eda::ThermalParser thermal_parser;
     if (!thermal_file.empty()) {
         std::cout << "  - 读取: " << thermal_file << "\n";
-        thermal_parser.parse_json(thermal_file, def_parser.gcell_grid());
+        if (!thermal_parser.parse_json(thermal_file, def_parser.gcell_grid(),
+                                       def_parser.dbu_per_micron(), def_parser.die_area())) {
+            std::cerr << "[ERROR] 热场 JSON 解析失败: " << thermal_file << "\n";
+            return 1;
+        }
     }
 
-    // 4. 执行 3D IC 多目标全局布线
-    std::cout << "[PHASE 4] 正在执行 3D IC 多目标全局布线优化 ...\n";
-    eda::GlobalRouter router(def_parser, lef_parser, thermal_parser);
+    // 4. 执行当前基线布线；容量感知寻路与重布仍待实现。
+    std::cout << "[PHASE 4] 正在执行 3D IC 基线布线 ...\n";
+    eda::BaselineRouter router(def_parser, lef_parser, thermal_parser);
     if (!router.route_all()) {
         std::cerr << "[ERROR] 全局布线算法执行异常!\n";
         return 1;
@@ -115,7 +120,7 @@ int main(int argc, char* argv[]) {
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
 
     std::cout << "===============================================================\n";
-    std::cout << "[SUCCESS] 3D 全局布线全流程成功完成! 总耗时: " << elapsed << " ms\n";
+    std::cout << "[SUCCESS] 基线 Guide 已导出! 总耗时: " << elapsed << " ms\n";
     std::cout << "===============================================================\n";
 
     return 0;

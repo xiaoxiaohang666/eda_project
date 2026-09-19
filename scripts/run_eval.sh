@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# 官方评测运行脚本：支持在 WSL2/Linux 环境下直接调用官方 score.py 评测布线结果
+# 调用仓库内的赛题评估器副本；结果仅反映该副本的检查和代理指标。
+set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${PROJECT_DIR}"
 
-export LD_LIBRARY_PATH="${PROJECT_DIR}/evaluator:${LD_LIBRARY_PATH}"
-export PYTHONPATH="${PROJECT_DIR}/evaluator:${PYTHONPATH}"
+export LD_LIBRARY_PATH="${PROJECT_DIR}/evaluator${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+export PYTHONPATH="${PROJECT_DIR}/evaluator${PYTHONPATH:+:${PYTHONPATH}}"
 
 GUIDE_FILE="${1:-benchmarks/sample001/sample001.output.guide}"
 LEF_FILE="${2:-benchmarks/sample001/sample001.input.lef}"
@@ -16,7 +17,7 @@ OUT_DIR="${5:-output/sample001}"
 mkdir -p "${OUT_DIR}"
 
 echo "================================================================"
-echo "          启动 2026 EDA 官方评测程序 (score.py)                 "
+echo "          启动仓库内赛题评估器副本 (score.py)                    "
 echo "================================================================"
 echo "Guide:   ${GUIDE_FILE}"
 echo "LEF:     ${LEF_FILE}"
@@ -32,5 +33,5 @@ python3 evaluator/score.py "${GUIDE_FILE}" \
     --output-dir "${OUT_DIR}"
 
 echo "================================================================"
-echo "评测完成！详细报告已输出至: ${OUT_DIR}/evaluation_report.json"
+echo "评估完成。详细报告: ${OUT_DIR}/evaluation_report.json"
 echo "================================================================"

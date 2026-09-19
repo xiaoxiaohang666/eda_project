@@ -17,8 +17,10 @@ class ThermalParser {
 public:
     ThermalParser() = default;
 
-    bool parse_csv(const std::string& csv_file_path, int rows, int cols, double ambient = 25.0);
-    bool parse_json(const std::string& json_file_path, const GCellGrid& grid);
+    // Supports the provided contest schema: meta.ambientTemp and nodes arrays
+    // containing [x_um, y_um, z_um, temperature].
+    bool parse_json(const std::string& json_file_path, const GCellGrid& grid,
+                    double dbu_per_micron, const Rect& die_area);
 
     double ambient_temperature() const { return ambient_; }
     double get_temperature(int col, int row) const {

@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.22)
 project(eda_3d_router
-    VERSION 1.0.0
-    DESCRIPTION "Multi-objective Global Routing for 3D IC"
-    LANGUAGES C CXX
+    VERSION 0.1.0
+    DESCRIPTION "3D IC global-routing framework with a runnable baseline"
+    LANGUAGES CXX
 )
 
 # 强制使用 C++20 标准
@@ -25,12 +25,10 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         add_compile_options(-O0 -g -fsanitize=address -fsanitize=undefined)
         add_link_options(-fsanitize=address -fsanitize=undefined)
     else()
-        add_compile_options(-O3 -march=native -DNDEBUG)
+        # 提交的可执行文件可能在不同 CPU 上运行，避免 -march=native。
+        add_compile_options(-O3 -DNDEBUG)
     endif()
 endif()
-
-# 查找常用线程库
-find_package(Threads REQUIRED)
 
 # 包含目录
 include_directories(
@@ -38,13 +36,13 @@ include_directories(
 )
 
 # 收集源码文件
-file(GLOB_RECURSE SOURCES
+# 新增算法源文件时自动触发 CMake 重新配置。
+file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
 )
 
 # 构建主可执行文件
 add_executable(eda_router ${SOURCES})
-target_link_libraries(eda_router PRIVATE Threads::Threads)
 
 # 安装/输出目标
 set_target_properties(eda_router PROPERTIES

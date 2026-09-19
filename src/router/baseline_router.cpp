@@ -1,17 +1,18 @@
-#include "router/router.hpp"
+#include "router/baseline_router.hpp"
 #include <fstream>
 #include <iostream>
 #include <set>
 #include <iomanip>
+#include <filesystem>
 
 namespace eda {
 
-GlobalRouter::GlobalRouter(const DefParser& def_parser,
+BaselineRouter::BaselineRouter(const DefParser& def_parser,
                            const LefParser& lef_parser,
                            const ThermalParser& thermal_parser)
     : def_(def_parser), lef_(lef_parser), thermal_(thermal_parser) {}
 
-GuideRect GlobalRouter::make_cell_rect(int col, int row, int layer_idx) const {
+GuideRect BaselineRouter::make_cell_rect(int col, int row, int layer_idx) const {
     const auto& grid = def_.gcell_grid();
     int c = std::clamp(col, 0, grid.cols - 1);
     int r = std::clamp(row, 0, grid.rows - 1);
@@ -22,7 +23,7 @@ GuideRect GlobalRouter::make_cell_rect(int col, int row, int layer_idx) const {
     return GuideRect(x1, y1, x2, y2, get_layer_name(layer_idx));
 }
 
-void GlobalRouter::add_path_between_cells(std::vector<GuideRect>& guides,
+void BaselineRouter::add_path_between_cells(std::vector<GuideRect>& guides,
                                          int c1, int r1, int layer1,
                                          int c2, int r2, int layer2) const {
     int base_h_layer = (layer1 <= 10) ? 1 : 11;
@@ -62,7 +63,7 @@ void GlobalRouter::add_path_between_cells(std::vector<GuideRect>& guides,
     }
 }
 
-void GlobalRouter::route_intra_die_net(const Net& net, bool is_top_die) {
+void BaselineRouter::route_intra_die_net(const Net& net, bool is_top_die) {
     (void)is_top_die;
     std::vector<GuideRect> guides;
     if (net.pins.empty()) return;
@@ -88,7 +89,7 @@ void GlobalRouter::route_intra_die_net(const Net& net, bool is_top_die) {
     routed_guides_[net.name] = normalize_and_merge(guides);
 }
 
-void GlobalRouter::route_cross_die_net(const Net& net) {
+void BaselineRouter::route_cross_die_net(const Net& net) {
     std::vector<GuideRect> guides;
     std::vector<Pin> bottom_pins;
     std::vector<Pin> top_pins;
@@ -181,7 +182,7 @@ void GlobalRouter::route_cross_die_net(const Net& net) {
     routed_guides_[net.name] = normalize_and_merge(guides);
 }
 
-void GlobalRouter::route_net(const Net& net) {
+void BaselineRouter::route_net(const Net& net) {
     if (net.is_cross_die) {
         route_cross_die_net(net);
     } else {
@@ -190,10 +191,10 @@ void GlobalRouter::route_net(const Net& net) {
     }
 }
 
-bool GlobalRouter::route_all() {
+bool BaselineRouter::route_all() {
     routed_guides_.clear();
     const auto& nets = def_.nets();
-    std::cout << "[INFO] 开始执行 3D IC 多目标全局布线, 总网络数: " << nets.size() << " ...\n";
+    std::cout << "[INFO] 开始执行基线布线, 总网络数: " << nets.size() << " ...\n";
 
     int cross_count = 0;
     for (const auto& net : nets) {
@@ -206,7 +207,7 @@ bool GlobalRouter::route_all() {
     return true;
 }
 
-std::vector<GuideRect> GlobalRouter::normalize_and_merge(const std::vector<GuideRect>& raw_guides) {
+std::vector<GuideRect> BaselineRouter::normalize_and_merge(const std::vector<GuideRect>& raw_guides) {
     std::unordered_map<std::string, std::vector<Rect>> layer_rects;
     for (const auto& g : raw_guides) {
         layer_rects[g.layer].push_back(Rect(g.x1, g.y1, g.x2, g.y2));
@@ -235,7 +236,17 @@ std::vector<GuideRect> GlobalRouter::normalize_and_merge(const std::vector<Guide
     return merged;
 }
 
-bool GlobalRouter::export_guide(const std::string& output_guide_path) const {
+bool BaselineRouter::export_guide(const std::string& output_guide_path) const {
+    const auto parent = std::filesystem::path(output_guide_path).parent_path();
+    if (!parent.empty()) {
+        std::error_code error;
+        std::filesystem::create_directories(parent, error);
+        if (error) {
+            std::cerr << "[ERROR] 无法创建 Guide 输出目录: " << parent << ": "
+                      << error.message() << "\n";
+            return false;
+        }
+    }
     std::ofstream fout(output_guide_path);
     if (!fout.is_open()) {
         std::cerr << "[ERROR] 无法写入 Guide 输出文件: " << output_guide_path << "\n";

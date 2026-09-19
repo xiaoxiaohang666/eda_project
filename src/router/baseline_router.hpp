@@ -10,9 +10,9 @@
 
 namespace eda {
 
-class GlobalRouter {
+class BaselineRouter {
 public:
-    GlobalRouter(const DefParser& def_parser,
+    BaselineRouter(const DefParser& def_parser,
                  const LefParser& lef_parser,
                  const ThermalParser& thermal_parser);
 
@@ -40,7 +40,7 @@ private:
                                 int c1, int r1, int layer1,
                                 int c2, int r2, int layer2) const;
 
-    // 辅助：矩形正规化与同向区间合并
+    // 当前只去除完全重复矩形；真正的区间合并待实现。
     static std::vector<GuideRect> normalize_and_merge(const std::vector<GuideRect>& raw_guides);
 };
 

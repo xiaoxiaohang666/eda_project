@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -e
 
-# 3D IC 全局布线器一键构建脚本
+# 3D IC 全局布线框架与基线构建脚本
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="${PROJECT_DIR}/build"
 BUILD_TYPE="${1:-Release}"
 
 echo "====================================================="
-echo "  正在构建 3D IC 全局布线优化器 (构建模式: ${BUILD_TYPE})"
+echo "  正在构建 3D IC 全局布线基线 (构建模式: ${BUILD_TYPE})"
 echo "====================================================="
 
 mkdir -p "${BUILD_DIR}"
