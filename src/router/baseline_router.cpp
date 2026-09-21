@@ -4,6 +4,7 @@
 #include <set>
 #include <iomanip>
 #include <filesystem>
+#include <tuple>
 
 namespace eda {
 
@@ -14,13 +15,9 @@ BaselineRouter::BaselineRouter(const DefParser& def_parser,
 
 GuideRect BaselineRouter::make_cell_rect(int col, int row, int layer_idx) const {
     const auto& grid = def_.gcell_grid();
-    int c = std::clamp(col, 0, grid.cols - 1);
-    int r = std::clamp(row, 0, grid.rows - 1);
-    double x1 = grid.x_lines[c];
-    double x2 = grid.x_lines[c + 1];
-    double y1 = grid.y_lines[r];
-    double y2 = grid.y_lines[r + 1];
-    return GuideRect(x1, y1, x2, y2, get_layer_name(layer_idx));
+    const auto cell = grid.get_cell_rect(col, row);
+    if (layer_idx < 1 || layer_idx > 20) throw std::runtime_error("invalid guide layer");
+    return GuideRect(cell.x1, cell.y1, cell.x2, cell.y2, get_layer_name(layer_idx));
 }
 
 void BaselineRouter::add_path_between_cells(std::vector<GuideRect>& guides,
@@ -74,7 +71,7 @@ void BaselineRouter::route_intra_die_net(const Net& net, bool is_top_die) {
     }
 
     if (net.pins.size() == 1) {
-        routed_guides_[net.name] = normalize_and_merge(guides);
+        routed_guides_[net.name] = deduplicate_guides(guides);
         return;
     }
 
@@ -86,7 +83,7 @@ void BaselineRouter::route_intra_die_net(const Net& net, bool is_top_die) {
                                target.gcell_col, target.gcell_row, target.layer_idx);
     }
 
-    routed_guides_[net.name] = normalize_and_merge(guides);
+    routed_guides_[net.name] = deduplicate_guides(guides);
 }
 
 void BaselineRouter::route_cross_die_net(const Net& net) {
@@ -179,7 +176,7 @@ void BaselineRouter::route_cross_die_net(const Net& net) {
         }
     }
 
-    routed_guides_[net.name] = normalize_and_merge(guides);
+    routed_guides_[net.name] = deduplicate_guides(guides);
 }
 
 void BaselineRouter::route_net(const Net& net) {
@@ -193,13 +190,29 @@ void BaselineRouter::route_net(const Net& net) {
 
 bool BaselineRouter::route_all() {
     routed_guides_.clear();
+    if (!def_.gcell_grid().valid() || def_.nets().empty()) {
+        std::cerr << "[ERROR] Cannot route an empty or invalid design\n";
+        return false;
+    }
     const auto& nets = def_.nets();
     std::cout << "[INFO] 开始执行基线布线, 总网络数: " << nets.size() << " ...\n";
 
     int cross_count = 0;
-    for (const auto& net : nets) {
-        route_net(net);
-        if (net.is_cross_die) cross_count++;
+    try {
+        for (const auto& net : nets) {
+            route_net(net);
+            if (net.is_cross_die) cross_count++;
+        }
+    } catch (const std::exception& error) {
+        std::cerr << "[ERROR] " << error.what() << "\n";
+        routed_guides_.clear();
+        return false;
+    }
+    std::string error;
+    if (!validate_guides(def_, lef_, routed_guides_, error)) {
+        std::cerr << "[ERROR] Guide validation: " << error << "\n";
+        routed_guides_.clear();
+        return false;
     }
 
     std::cout << "[INFO] 全局布线完成! 跨 Die 网络: " << cross_count 
@@ -207,36 +220,29 @@ bool BaselineRouter::route_all() {
     return true;
 }
 
-std::vector<GuideRect> BaselineRouter::normalize_and_merge(const std::vector<GuideRect>& raw_guides) {
+std::vector<GuideRect> BaselineRouter::deduplicate_guides(const std::vector<GuideRect>& raw_guides) {
+    // Preserve the baseline's layer/rectangle traversal: the package scorer's
+    // MST tie breaking can change its length proxy after a pure reordering.
     std::unordered_map<std::string, std::vector<Rect>> layer_rects;
-    for (const auto& g : raw_guides) {
-        layer_rects[g.layer].push_back(Rect(g.x1, g.y1, g.x2, g.y2));
-    }
-
-    std::vector<GuideRect> merged;
-    for (auto& [layer, rects] : layer_rects) {
-        std::vector<Rect> unique_rects;
+    for (const auto& g : raw_guides)
+        layer_rects[g.layer].emplace_back(g.x1, g.y1, g.x2, g.y2);
+    std::vector<GuideRect> unique;
+    for (const auto& [layer, rects] : layer_rects) {
+        std::set<std::tuple<double, double, double, double>> seen;
         for (const auto& r : rects) {
-            bool exists = false;
-            for (const auto& u : unique_rects) {
-                if (std::abs(r.x1 - u.x1) < 1.0 && std::abs(r.y1 - u.y1) < 1.0 &&
-                    std::abs(r.x2 - u.x2) < 1.0 && std::abs(r.y2 - u.y2) < 1.0) {
-                    exists = true;
-                    break;
-                }
-            }
-            if (!exists) unique_rects.push_back(r);
-        }
-
-        for (const auto& r : unique_rects) {
-            merged.emplace_back(r.x1, r.y1, r.x2, r.y2, layer);
+            if (seen.emplace(r.x1, r.y1, r.x2, r.y2).second)
+                unique.emplace_back(r.x1, r.y1, r.x2, r.y2, layer);
         }
     }
-
-    return merged;
+    return unique;
 }
 
 bool BaselineRouter::export_guide(const std::string& output_guide_path) const {
+    std::string validation_error;
+    if (!validate_guides(def_, lef_, routed_guides_, validation_error)) {
+        std::cerr << "[ERROR] Cannot export: " << validation_error << "\n";
+        return false;
+    }
     const auto parent = std::filesystem::path(output_guide_path).parent_path();
     if (!parent.empty()) {
         std::error_code error;
@@ -262,6 +268,11 @@ bool BaselineRouter::export_guide(const std::string& output_guide_path) const {
         fout << ")\n";
     }
 
+    fout.close();
+    if (!fout) {
+        std::cerr << "[ERROR] Failed writing/flushing Guide: " << output_guide_path << "\n";
+        return false;
+    }
     std::cout << "[INFO] Route Guide 导出成功: " << output_guide_path << "\n";
     return true;
 }

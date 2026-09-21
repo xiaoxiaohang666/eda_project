@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 #include <chrono>
+#include <filesystem>
 
 void print_banner() {
     std::cout << "===============================================================\n";
@@ -56,6 +57,10 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         const std::string value = argv[++i];
+        if (value.empty() || value[0] == '-') {
+            std::cerr << "[ERROR] 参数缺少有效文件路径: " << arg << "\n";
+            return 1;
+        }
         if (arg == "--input-def") def_file = value;
         else if (arg == "--lefs") lef_files.push_back(value);
         else if (arg == "--thermal-json") thermal_file = value;
@@ -69,6 +74,22 @@ int main(int argc, char* argv[]) {
     }
 
     auto start_time = std::chrono::steady_clock::now();
+    try {
+        auto inputs = lef_files;
+        inputs.push_back(def_file);
+        inputs.push_back(thermal_file);
+        for (const auto& input : inputs) {
+            if (std::filesystem::weakly_canonical(input) == std::filesystem::weakly_canonical(output_file) ||
+                (std::filesystem::exists(input) && std::filesystem::exists(output_file) &&
+                 std::filesystem::equivalent(input, output_file))) {
+                std::cerr << "[ERROR] 输出路径不能覆盖输入文件: " << input << "\n";
+                return 1;
+            }
+        }
+    } catch (const std::filesystem::filesystem_error& error) {
+        std::cerr << "[ERROR] " << error.what() << "\n";
+        return 1;
+    }
 
     // 1. 解析 LEF 工艺库
     std::cout << "[PHASE 1] 正在解析工艺库 (LEF) ...\n";

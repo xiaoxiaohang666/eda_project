@@ -12,7 +12,16 @@ GUIDE_FILE="${1:-benchmarks/sample001/sample001.output.guide}"
 LEF_FILE="${2:-benchmarks/sample001/sample001.input.lef}"
 DEF_FILE="${3:-benchmarks/sample001/sample001.input.def}"
 THERMAL_FILE="${4:-benchmarks/sample001/sample001.thermal.input.json}"
-OUT_DIR="${5:-output/sample001}"
+if (( $# > 5 )); then
+    echo "[ERROR] Usage: run_eval.sh [guide [lef [def [thermal [output_dir]]]]]" >&2
+    exit 1
+fi
+if [[ -n "${5:-}" ]]; then
+    OUT_DIR="$5"
+else
+    mkdir -p output/evaluations
+    OUT_DIR="$(mktemp -d output/evaluations/run-XXXXXXXX)"
+fi
 
 mkdir -p "${OUT_DIR}"
 
@@ -26,7 +35,7 @@ echo "Thermal: ${THERMAL_FILE}"
 echo "OutDir:  ${OUT_DIR}"
 echo "----------------------------------------------------------------"
 
-python3 evaluator/score.py "${GUIDE_FILE}" \
+python3 scripts/evaluate.py "${GUIDE_FILE}" \
     --lefs "${LEF_FILE}" \
     --input-def "${DEF_FILE}" \
     --thermal-json "${THERMAL_FILE}" \

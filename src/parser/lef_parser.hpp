@@ -11,12 +11,14 @@ struct MacroPinInfo {
     std::string name;
     std::string layer;
     Rect bbox;
+    bool has_rect{false};
 };
 
 struct MacroInfo {
     std::string name;
     double width{0.0};
     double height{0.0};
+    Point origin;
     std::unordered_map<std::string, MacroPinInfo> pins;
 };
 
@@ -31,8 +33,7 @@ public:
         if (it != layer_directions_.end()) {
             return it->second;
         }
-        int idx = get_layer_index(layer_name);
-        return (idx % 2 == 1) ? Direction::HORIZONTAL : Direction::VERTICAL;
+        return Direction::UNKNOWN;
     }
 
     const MacroInfo* get_macro(const std::string& macro_name) const {

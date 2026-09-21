@@ -30,13 +30,12 @@ public:
 
 private:
     Rect die_area_;
-    double dbu_per_micron_{2000.0};
+    double dbu_per_micron_{0.0};
     GCellGrid grid_;
     std::vector<Net> nets_;
     std::unordered_map<std::string, Pin> io_pins_;
     std::unordered_map<std::string, Component> components_;
 
-    void build_grid(const std::vector<double>& x_steps, const std::vector<double>& y_steps);
 };
 
 } // namespace eda

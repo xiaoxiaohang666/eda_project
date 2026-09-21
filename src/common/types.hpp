@@ -8,6 +8,8 @@
 #include <unordered_map>
 #include <map>
 #include <cstdint>
+#include <charconv>
+#include <stdexcept>
 
 namespace eda {
 
@@ -91,14 +93,14 @@ struct Net {
 
     bool has_bottom_pin() const {
         for (const auto& pin : pins) {
-            if (pin.layer_idx <= 10) return true;
+            if (pin.layer_idx >= 1 && pin.layer_idx <= 10) return true;
         }
         return false;
     }
 
     bool has_top_pin() const {
         for (const auto& pin : pins) {
-            if (pin.layer_idx >= 11) return true;
+            if (pin.layer_idx >= 11 && pin.layer_idx <= 20) return true;
         }
         return false;
     }
@@ -110,8 +112,20 @@ struct GCellGrid {
     int cols{0};
     int rows{0};
 
+    bool valid() const {
+        auto ordered = [](const std::vector<double>& lines) {
+            for (size_t i = 0; i < lines.size(); ++i) {
+                if (!std::isfinite(lines[i]) || (i && lines[i] <= lines[i - 1])) return false;
+            }
+            return true;
+        };
+        return cols > 0 && rows > 0 && x_lines.size() == static_cast<size_t>(cols) + 1 &&
+               y_lines.size() == static_cast<size_t>(rows) + 1 && ordered(x_lines) && ordered(y_lines);
+    }
+
     int get_col(double x) const {
-        if (x_lines.empty()) return -1;
+        if (cols <= 0 || x_lines.size() != static_cast<size_t>(cols) + 1 || !std::isfinite(x) ||
+            x < x_lines.front() || x > x_lines.back()) return -1;
         if (x <= x_lines.front()) return 0;
         if (x >= x_lines.back()) return static_cast<int>(x_lines.size()) - 2;
         auto it = std::upper_bound(x_lines.begin(), x_lines.end(), x);
@@ -120,7 +134,8 @@ struct GCellGrid {
     }
 
     int get_row(double y) const {
-        if (y_lines.empty()) return -1;
+        if (rows <= 0 || y_lines.size() != static_cast<size_t>(rows) + 1 || !std::isfinite(y) ||
+            y < y_lines.front() || y > y_lines.back()) return -1;
         if (y <= y_lines.front()) return 0;
         if (y >= y_lines.back()) return static_cast<int>(y_lines.size()) - 2;
         auto it = std::upper_bound(y_lines.begin(), y_lines.end(), y);
@@ -129,6 +144,10 @@ struct GCellGrid {
     }
 
     Rect get_cell_rect(int col, int row) const {
+        if (col < 0 || col >= cols || row < 0 || row >= rows ||
+            x_lines.size() != static_cast<size_t>(cols) + 1 ||
+            y_lines.size() != static_cast<size_t>(rows) + 1)
+            throw std::out_of_range("invalid GCell index");
         double x1 = x_lines[col];
         double x2 = x_lines[col + 1];
         double y1 = y_lines[row];
@@ -139,11 +158,12 @@ struct GCellGrid {
 
 inline int get_layer_index(const std::string& layer_name) {
     if (layer_name.rfind("metal", 0) == 0) {
-        try {
-            return std::stoi(layer_name.substr(5));
-        } catch (...) {
-            return 0;
-        }
+        int index = 0;
+        const char* begin = layer_name.data() + 5;
+        const char* end = layer_name.data() + layer_name.size();
+        const auto result = std::from_chars(begin, end, index);
+        if (result.ec == std::errc{} && result.ptr == end && index >= 1 && index <= 20 &&
+            layer_name == "metal" + std::to_string(index)) return index;
     }
     return 0;
 }

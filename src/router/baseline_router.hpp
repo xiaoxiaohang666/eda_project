@@ -4,6 +4,7 @@
 #include "parser/def_parser.hpp"
 #include "parser/lef_parser.hpp"
 #include "parser/thermal_parser.hpp"
+#include "validation/guide_validator.hpp"
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -26,7 +27,7 @@ private:
     const ThermalParser& thermal_;
 
     // 每个 Net 对应的 Guide 矩形集合
-    std::unordered_map<std::string, std::vector<GuideRect>> routed_guides_;
+    GuideMap routed_guides_;
 
     void route_net(const Net& net);
     void route_intra_die_net(const Net& net, bool is_top_die);
@@ -41,7 +42,7 @@ private:
                                 int c2, int r2, int layer2) const;
 
     // 当前只去除完全重复矩形；真正的区间合并待实现。
-    static std::vector<GuideRect> normalize_and_merge(const std::vector<GuideRect>& raw_guides);
+    static std::vector<GuideRect> deduplicate_guides(const std::vector<GuideRect>& raw_guides);
 };
 
 } // namespace eda

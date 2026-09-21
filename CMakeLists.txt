@@ -21,13 +21,9 @@ endif()
 # 编译选项与优化标志
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-Wall -Wextra -pedantic)
-    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-        add_compile_options(-O0 -g -fsanitize=address -fsanitize=undefined)
-        add_link_options(-fsanitize=address -fsanitize=undefined)
-    else()
-        # 提交的可执行文件可能在不同 CPU 上运行，避免 -march=native。
-        add_compile_options(-O3 -DNDEBUG)
-    endif()
+    # CMake owns optimization flags for Release/RelWithDebInfo/MinSizeRel.
+    add_compile_options("$<$<CONFIG:Debug>:-fsanitize=address,undefined>")
+    add_link_options("$<$<CONFIG:Debug>:-fsanitize=address,undefined>")
 endif()
 
 # 包含目录
@@ -42,9 +38,25 @@ file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS
 )
 
 # 构建主可执行文件
-add_executable(eda_router ${SOURCES})
+list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp")
+add_library(eda_core STATIC ${SOURCES})
+add_executable(eda_router src/main.cpp)
+target_link_libraries(eda_router PRIVATE eda_core)
 
 # 安装/输出目标
 set_target_properties(eda_router PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(framework_tests tests/framework_tests.cpp)
+    target_link_libraries(framework_tests PRIVATE eda_core)
+    add_test(NAME framework COMMAND framework_tests
+        "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/test-artifacts")
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    add_test(NAME cli COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cli.py" "$<TARGET_FILE:eda_router>")
+    add_test(NAME evaluation_wrapper COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_evaluate.py")
+endif()
