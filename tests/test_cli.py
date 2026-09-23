@@ -13,6 +13,11 @@ INPUTS = [
     "--lefs", str(CASE / "sample001.input.lef"),
     "--thermal-json", str(CASE / "sample001.thermal.input.json"),
 ]
+SUBMISSION_INPUTS = [
+    "--def", str(CASE / "sample001.input.def"),
+    "--lef", str(CASE / "sample001.input.lef"),
+    "--thermal-report", str(CASE / "sample001.thermal.input.json"),
+]
 
 
 class CliTests(unittest.TestCase):
@@ -36,6 +41,15 @@ class CliTests(unittest.TestCase):
 
     def test_missing_file(self):
         self.run_cli([*INPUTS, "--input-def", "def-does-not-exist"])
+
+    def test_submission_argument_names(self):
+        with tempfile.TemporaryDirectory(prefix="eda-submission-cli-", dir=BINARY.parent.parent) as folder:
+            submission_output = pathlib.Path(folder) / "submission.guide"
+            legacy_output = pathlib.Path(folder) / "legacy.guide"
+            self.run_cli([*SUBMISSION_INPUTS, "--output", str(submission_output)], success=True)
+            self.run_cli([*INPUTS, "-o", str(legacy_output)], success=True)
+            self.assertTrue(submission_output.read_bytes())
+            self.assertEqual(submission_output.read_bytes(), legacy_output.read_bytes())
 
     def test_no_input_overwrite(self):
         for path in [INPUTS[1], INPUTS[3], INPUTS[5]]:

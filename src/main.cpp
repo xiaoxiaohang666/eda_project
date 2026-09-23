@@ -19,12 +19,12 @@ void print_banner() {
 
 void print_usage(const char* prog) {
     std::cout << "用法说明 (Usage):\n";
-    std::cout << "  " << prog << " --input-def <path> --lefs <path> --thermal-json <path> -o <result.guide>\n\n";
+    std::cout << "  " << prog << " --def <path> --lef <path> --thermal-report <path> --output <result.guide>\n\n";
     std::cout << "选项参数:\n";
-    std::cout << "  --input-def <file>     : 3D 布局 DEF 输入文件路径\n";
-    std::cout << "  --lefs <file>          : 金属层及器件工艺 LEF 文件路径 (可多次指定)\n";
-    std::cout << "  --thermal-json <file>  : 稳态温度场分布 JSON 文件路径\n";
-    std::cout << "  -o, --output <file>    : 导出的 ISPD 18/19 标准 Route Guide 路径\n";
+    std::cout << "  --def <file>           : 3D 布局 DEF 输入文件路径 (--input-def 兼容)\n";
+    std::cout << "  --lef <file>           : 金属层及器件工艺 LEF 文件路径 (可多次指定，--lefs 兼容)\n";
+    std::cout << "  --thermal-report <file> : 稳态温度场分布 JSON 文件路径 (--thermal-json 兼容)\n";
+    std::cout << "  --output <file>        : 导出的 ISPD 18/19 标准 Route Guide 路径 (-o 兼容)\n";
     std::cout << "===============================================================\n";
 }
 
@@ -47,8 +47,11 @@ int main(int argc, char* argv[]) {
             print_usage(argv[0]);
             return 0;
         }
-        if (arg != "--input-def" && arg != "--lefs" &&
-            arg != "--thermal-json" && arg != "-o" && arg != "--output") {
+        const bool def_option = arg == "--def" || arg == "--input-def";
+        const bool lef_option = arg == "--lef" || arg == "--lefs";
+        const bool thermal_option = arg == "--thermal-report" || arg == "--thermal-json";
+        const bool output_option = arg == "--output" || arg == "-o";
+        if (!def_option && !lef_option && !thermal_option && !output_option) {
             std::cerr << "[ERROR] 未知参数: " << arg << "\n";
             return 1;
         }
@@ -61,14 +64,14 @@ int main(int argc, char* argv[]) {
             std::cerr << "[ERROR] 参数缺少有效文件路径: " << arg << "\n";
             return 1;
         }
-        if (arg == "--input-def") def_file = value;
-        else if (arg == "--lefs") lef_files.push_back(value);
-        else if (arg == "--thermal-json") thermal_file = value;
+        if (def_option) def_file = value;
+        else if (lef_option) lef_files.push_back(value);
+        else if (thermal_option) thermal_file = value;
         else output_file = value;
     }
 
     if (def_file.empty() || lef_files.empty() || thermal_file.empty()) {
-        std::cerr << "[ERROR] 缺少必要输入 (--input-def、--lefs、--thermal-json)\n";
+        std::cerr << "[ERROR] 缺少必要输入 (--def、--lef、--thermal-report)\n";
         print_usage(argv[0]);
         return 1;
     }
