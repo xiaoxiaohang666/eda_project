@@ -15,6 +15,20 @@ struct Component {
     std::string orient;
 };
 
+struct TrackInfo {
+    char axis{'X'};
+    double start{0.0};
+    int count{0};
+    double step{0.0};
+    std::vector<std::string> layers;
+};
+
+// Local LEF microns -> oriented, placed global DEF DBU.
+Point transform_macro_point(Point point, const MacroInfo& macro,
+                            const Component& component, double dbu_per_micron);
+Rect transform_macro_rect(const Rect& rect, const MacroInfo& macro,
+                          const Component& component, double dbu_per_micron);
+
 class DefParser {
 public:
     DefParser() = default;
@@ -27,6 +41,7 @@ public:
     const std::vector<Net>& nets() const { return nets_; }
     const std::unordered_map<std::string, Pin>& io_pins() const { return io_pins_; }
     const std::unordered_map<std::string, Component>& components() const { return components_; }
+    const std::vector<TrackInfo>& tracks() const { return tracks_; }
 
 private:
     Rect die_area_;
@@ -35,6 +50,7 @@ private:
     std::vector<Net> nets_;
     std::unordered_map<std::string, Pin> io_pins_;
     std::unordered_map<std::string, Component> components_;
+    std::vector<TrackInfo> tracks_;
 
 };
 

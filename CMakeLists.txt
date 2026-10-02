@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.22)
 project(eda_3d_router
-    VERSION 0.1.0
-    DESCRIPTION "3D IC global-routing framework with a runnable baseline"
+    VERSION 1.0.0
+    DESCRIPTION "3D IC capacity-aware global router"
     LANGUAGES CXX
 )
 
@@ -59,4 +59,18 @@ if(BUILD_TESTING)
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cli.py" "$<TARGET_FILE:eda_router>")
     add_test(NAME evaluation_wrapper COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_evaluate.py")
+
+    add_executable(resource_tests tests/resource_tests.cpp)
+    target_link_libraries(resource_tests PRIVATE eda_core)
+    add_test(NAME resources COMMAND resource_tests "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/resource-artifacts")
+    add_test(NAME algorithm COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_algorithm.py" "$<TARGET_FILE:eda_router>")
+
+    add_executable(metrics_policy_tests tests/metrics_policy_tests.cpp)
+    target_link_libraries(metrics_policy_tests PRIVATE eda_core)
+    add_test(NAME metrics_policy COMMAND metrics_policy_tests "${CMAKE_CURRENT_SOURCE_DIR}")
+
+    add_executable(search_tests tests/search_tests.cpp)
+    target_link_libraries(search_tests PRIVATE eda_core)
+    add_test(NAME search COMMAND search_tests "${CMAKE_CURRENT_SOURCE_DIR}")
 endif()

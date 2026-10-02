@@ -84,6 +84,8 @@ struct Pin {
     int layer_idx{0}; // 1..20
     int gcell_col{-1};
     int gcell_row{-1};
+    Point evaluator_coord; // Fixed checker ignores instance orientation/LEF ORIGIN.
+    bool has_evaluator_coord{false};
 };
 
 struct Net {

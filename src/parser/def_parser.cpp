@@ -55,6 +55,22 @@ std::vector<double> grid_lines(const std::vector<std::tuple<double, int, double>
 }
 } // namespace
 
+Point transform_macro_point(Point point, const MacroInfo& macro,
+                            const Component& component, double dbu_per_micron) {
+    if (!std::isfinite(dbu_per_micron) || dbu_per_micron <= 0)
+        throw std::runtime_error("invalid geometry DBU scale");
+    const auto local = macro_point(point, macro, component.orient);
+    return {component.origin.x + local.x * dbu_per_micron,
+            component.origin.y + local.y * dbu_per_micron};
+}
+
+Rect transform_macro_rect(const Rect& rect, const MacroInfo& macro,
+                          const Component& component, double dbu_per_micron) {
+    const auto a = transform_macro_point({rect.x1, rect.y1}, macro, component, dbu_per_micron);
+    const auto b = transform_macro_point({rect.x2, rect.y2}, macro, component, dbu_per_micron);
+    return {a.x, a.y, b.x, b.y};
+}
+
 bool DefParser::parse(const std::string& def_file_path, const LefParser& lef_parser) {
     *this = DefParser{};
     try {
@@ -82,6 +98,23 @@ bool DefParser::parse(const std::string& def_file_path, const LefParser& lef_par
                 const double step = t.number(); t.expect(";");
                 if (axis != "X" && axis != "Y") throw std::runtime_error("invalid GCELLGRID axis");
                 (axis == "X" ? xs : ys).emplace_back(start, count, step);
+            } else if (key == "TRACKS") {
+                TrackInfo track;
+                const auto axis = t.take();
+                if (axis != "X" && axis != "Y") throw std::runtime_error("invalid TRACKS axis");
+                track.axis = axis[0]; track.start = t.number(); t.expect("DO");
+                track.count = t.integer(); t.expect("STEP"); track.step = t.number();
+                t.expect("LAYER");
+                while (t.peek() != ";") {
+                    const auto layer = t.take();
+                    if (!get_layer_index(layer) || lef_parser.get_layer_direction(layer) == Direction::UNKNOWN)
+                        throw std::runtime_error("TRACKS refers to unknown routing layer " + layer);
+                    track.layers.push_back(layer);
+                }
+                t.expect(";");
+                if (track.count <= 0 || track.step <= 0 || track.layers.empty())
+                    throw std::runtime_error("invalid TRACKS count, step or layers");
+                tracks_.push_back(std::move(track));
             } else if (key == "COMPONENTS" || key == "PINS" || key == "NETS") {
                 if (!units || !die) throw std::runtime_error("UNITS/DIEAREA must precede design objects");
                 if (!sections.insert(key).second) throw std::runtime_error("duplicate section " + key);
@@ -133,6 +166,7 @@ bool DefParser::parse(const std::string& def_file_path, const LefParser& lef_par
                         if (!placed || !layer_seen) throw std::runtime_error("missing IO placement/layer: " + name);
                         offset = orient_point(offset, orient);
                         pin.coord = {placement.x + offset.x, placement.y + offset.y};
+                        pin.evaluator_coord = placement; pin.has_evaluator_coord = true;
                         pin.layer_idx = get_layer_index(pin.layer);
                         if (!pin.layer_idx || lef_parser.get_layer_direction(pin.layer) == Direction::UNKNOWN ||
                             !io_pins_.emplace(name, pin).second)
@@ -156,10 +190,13 @@ bool DefParser::parse(const std::string& def_file_path, const LefParser& lef_par
                                 if (mp == macro->pins.end() || !mp->second.has_rect)
                                     throw std::runtime_error("missing macro pin: " + instance + "." + pin_name);
                                 pin.name = instance + "." + pin_name;
+                                const auto checker_offset = mp->second.bbox.center();
+                                pin.evaluator_coord = {c.origin.x + checker_offset.x * dbu_per_micron_,
+                                                       c.origin.y + checker_offset.y * dbu_per_micron_};
+                                pin.has_evaluator_coord = true;
                                 pin.layer = mp->second.layer; pin.layer_idx = get_layer_index(pin.layer);
-                                const auto offset = macro_point(mp->second.bbox.center(), *macro, c.orient);
-                                pin.coord = {c.origin.x + offset.x * dbu_per_micron_,
-                                             c.origin.y + offset.y * dbu_per_micron_};
+                                pin.coord = transform_macro_point(mp->second.bbox.center(), *macro, c,
+                                                                  dbu_per_micron_);
                             }
                             net.pins.push_back(pin);
                         }

@@ -1,151 +1,73 @@
-#include "common/types.hpp"
 #include "parser/lef_parser.hpp"
 #include "parser/def_parser.hpp"
 #include "parser/thermal_parser.hpp"
 #include "router/baseline_router.hpp"
-
-#include <iostream>
-#include <string>
-#include <vector>
-#include <chrono>
+#include "router/negotiated_router.hpp"
 #include <filesystem>
+#include <iostream>
+#include <memory>
 
-void print_banner() {
-    std::cout << "===============================================================\n";
-    std::cout << "                 3D IC Global Routing Baseline                 \n";
-    std::cout << "  2026 EDA Elite Challenge - Zhuhai Silicon Core Technology    \n";
-    std::cout << "===============================================================\n";
+namespace {
+void usage(const char* p) {
+    std::cout<<"3D IC Global Router v1\nUsage: "<<p<<" --def FILE --lef FILE --thermal-report FILE --output FILE\n"
+        <<"Input aliases: --input-def, --lefs (repeatable), --thermal-json, -o\n"
+        <<"--router negotiated|baseline  (default negotiated)\n"
+        <<"--rrr-rounds N  --tsv-rounds N  (defaults 30, 10)\n"
+        <<"--search astar|dijkstra  --search-limit N (per search, default 250000)\n"
+        <<"--time-limit SECONDS (default 120)  --local-repair 0|1 (default 1)\n"
+        <<"--stats FILE  Write metrics, TSV policy, assignment and search counters\n";
 }
-
-void print_usage(const char* prog) {
-    std::cout << "用法说明 (Usage):\n";
-    std::cout << "  " << prog << " --def <path> --lef <path> --thermal-report <path> --output <result.guide>\n\n";
-    std::cout << "选项参数:\n";
-    std::cout << "  --def <file>           : 3D 布局 DEF 输入文件路径 (--input-def 兼容)\n";
-    std::cout << "  --lef <file>           : 金属层及器件工艺 LEF 文件路径 (可多次指定，--lefs 兼容)\n";
-    std::cout << "  --thermal-report <file> : 稳态温度场分布 JSON 文件路径 (--thermal-json 兼容)\n";
-    std::cout << "  --output <file>        : 导出的 ISPD 18/19 标准 Route Guide 路径 (-o 兼容)\n";
-    std::cout << "===============================================================\n";
+int integer(const std::string& value,bool positive=false) {
+    size_t end=0;long n=std::stol(value,&end);
+    if(end!=value.size()||n<(positive?1:0)||n>100000000) throw std::runtime_error("invalid integer option: "+value);
+    return int(n);
 }
-
-int main(int argc, char* argv[]) {
-    print_banner();
-
-    if (argc < 2) {
-        print_usage(argv[0]);
-        return 1;
-    }
-
-    std::string def_file;
-    std::vector<std::string> lef_files;
-    std::string thermal_file;
-    std::string output_file = "output/result.guide";
-
-    for (int i = 1; i < argc; ++i) {
-        std::string arg = argv[i];
-        if (arg == "-h" || arg == "--help") {
-            print_usage(argv[0]);
-            return 0;
-        }
-        const bool def_option = arg == "--def" || arg == "--input-def";
-        const bool lef_option = arg == "--lef" || arg == "--lefs";
-        const bool thermal_option = arg == "--thermal-report" || arg == "--thermal-json";
-        const bool output_option = arg == "--output" || arg == "-o";
-        if (!def_option && !lef_option && !thermal_option && !output_option) {
-            std::cerr << "[ERROR] 未知参数: " << arg << "\n";
-            return 1;
-        }
-        if (i + 1 >= argc) {
-            std::cerr << "[ERROR] 参数缺少文件路径: " << arg << "\n";
-            return 1;
-        }
-        const std::string value = argv[++i];
-        if (value.empty() || value[0] == '-') {
-            std::cerr << "[ERROR] 参数缺少有效文件路径: " << arg << "\n";
-            return 1;
-        }
-        if (def_option) def_file = value;
-        else if (lef_option) lef_files.push_back(value);
-        else if (thermal_option) thermal_file = value;
-        else output_file = value;
-    }
-
-    if (def_file.empty() || lef_files.empty() || thermal_file.empty()) {
-        std::cerr << "[ERROR] 缺少必要输入 (--def、--lef、--thermal-report)\n";
-        print_usage(argv[0]);
-        return 1;
-    }
-
-    auto start_time = std::chrono::steady_clock::now();
+bool same_file(const std::string& a,const std::string& b) {
+    return std::filesystem::weakly_canonical(a)==std::filesystem::weakly_canonical(b)||
+        (std::filesystem::exists(a)&&std::filesystem::exists(b)&&std::filesystem::equivalent(a,b));
+}
+}
+int main(int argc,char** argv) {
     try {
-        auto inputs = lef_files;
-        inputs.push_back(def_file);
-        inputs.push_back(thermal_file);
-        for (const auto& input : inputs) {
-            if (std::filesystem::weakly_canonical(input) == std::filesystem::weakly_canonical(output_file) ||
-                (std::filesystem::exists(input) && std::filesystem::exists(output_file) &&
-                 std::filesystem::equivalent(input, output_file))) {
-                std::cerr << "[ERROR] 输出路径不能覆盖输入文件: " << input << "\n";
-                return 1;
-            }
+        if(argc<2) {usage(argv[0]);return 1;}
+        std::string def_file,thermal_file,output="output/result.guide",stats,kind="negotiated";
+        std::vector<std::string> lefs;eda::RouterOptions options;
+        for(int i=1;i<argc;++i) {
+            std::string arg=argv[i];if(arg=="--help"||arg=="-h") {usage(argv[0]);return 0;}
+            const std::set<std::string> recognized={"--def","--input-def","--lef","--lefs","--thermal-report","--thermal-json",
+                "--output","-o","--stats","--router","--rrr-rounds","--tsv-rounds","--search","--time-limit","--search-limit","--local-repair"};
+            if(!recognized.count(arg)) throw std::runtime_error("unknown option: "+arg);
+            if(i+1>=argc) throw std::runtime_error("missing option value: "+arg);
+            const std::string value=argv[++i];if(value.empty()||value[0]=='-') throw std::runtime_error("invalid option value: "+arg);
+            if(arg=="--def"||arg=="--input-def") def_file=value;
+            else if(arg=="--lef"||arg=="--lefs") lefs.push_back(value);
+            else if(arg=="--thermal-report"||arg=="--thermal-json") thermal_file=value;
+            else if(arg=="--output"||arg=="-o") output=value;
+            else if(arg=="--stats") stats=value;
+            else if(arg=="--router") {if(value!="baseline"&&value!="negotiated") throw std::runtime_error("invalid router");kind=value;}
+            else if(arg=="--rrr-rounds") options.rrr_rounds=integer(value);
+            else if(arg=="--tsv-rounds") options.tsv_rounds=integer(value);
+            else if(arg=="--search-limit") options.search_limit=size_t(integer(value,true));
+            else if(arg=="--local-repair") {int v=integer(value);if(v>1) throw std::runtime_error("local-repair must be 0 or 1");options.local_repair=v;}
+            else if(arg=="--search") {if(value!="astar"&&value!="dijkstra") throw std::runtime_error("invalid search");options.dijkstra=value=="dijkstra";}
+            else if(arg=="--time-limit") {size_t end=0;options.time_limit=std::stod(value,&end);
+                if(end!=value.size()||!std::isfinite(options.time_limit)||options.time_limit<=0) throw std::runtime_error("invalid time limit");}
         }
-    } catch (const std::filesystem::filesystem_error& error) {
-        std::cerr << "[ERROR] " << error.what() << "\n";
-        return 1;
-    }
-
-    // 1. 解析 LEF 工艺库
-    std::cout << "[PHASE 1] 正在解析工艺库 (LEF) ...\n";
-    eda::LefParser lef_parser;
-    for (const auto& lef_path : lef_files) {
-        std::cout << "  - 读取: " << lef_path << "\n";
-        if (!lef_parser.parse(lef_path)) {
-            std::cerr << "[ERROR] 解析 LEF 文件失败: " << lef_path << "\n";
-            return 1;
+        if(def_file.empty()||lefs.empty()||thermal_file.empty()) throw std::runtime_error("required: --def --lef --thermal-report");
+        std::vector<std::string> inputs=lefs;inputs.push_back(def_file);inputs.push_back(thermal_file);
+        for(const auto& input:inputs) if(same_file(input,output)||(!stats.empty()&&same_file(input,stats)))
+            throw std::runtime_error("output/stats cannot overwrite input: "+input);
+        if(!stats.empty()&&same_file(output,stats)) throw std::runtime_error("stats and guide output must differ");
+        if(kind=="baseline"&&!stats.empty()) throw std::runtime_error("--stats requires negotiated router");
+        eda::LefParser lef;for(const auto& p:lefs) if(!lef.parse(p)) return 1;
+        eda::DefParser def;if(!def.parse(def_file,lef)) return 1;
+        eda::ThermalParser thermal;if(!thermal.parse_json(thermal_file,def.gcell_grid(),def.dbu_per_micron(),def.die_area())) return 1;
+        if(kind=="baseline") {
+            eda::BaselineRouter router(def,lef,thermal);if(!router.route_all()||!router.export_guide(output)) return 1;
+        } else {
+            eda::NegotiatedRouter router(def,lef,thermal,options);
+            if(!router.route_all()||!router.export_guide(output)||(!stats.empty()&&!router.export_stats(stats))) return 1;
         }
-    }
-
-    // 2. 解析 DEF 布局与网络
-    std::cout << "[PHASE 2] 正在解析布局与网络 (DEF): " << def_file << " ...\n";
-    eda::DefParser def_parser;
-    if (!def_parser.parse(def_file, lef_parser)) {
-        std::cerr << "[ERROR] 解析 DEF 文件失败: " << def_file << "\n";
-        return 1;
-    }
-
-    // 3. 解析芯片稳态热力场
-    std::cout << "[PHASE 3] 正在加载稳态热力场 (Thermal) ...\n";
-    eda::ThermalParser thermal_parser;
-    if (!thermal_file.empty()) {
-        std::cout << "  - 读取: " << thermal_file << "\n";
-        if (!thermal_parser.parse_json(thermal_file, def_parser.gcell_grid(),
-                                       def_parser.dbu_per_micron(), def_parser.die_area())) {
-            std::cerr << "[ERROR] 热场 JSON 解析失败: " << thermal_file << "\n";
-            return 1;
-        }
-    }
-
-    // 4. 执行当前基线布线；容量感知寻路与重布仍待实现。
-    std::cout << "[PHASE 4] 正在执行 3D IC 基线布线 ...\n";
-    eda::BaselineRouter router(def_parser, lef_parser, thermal_parser);
-    if (!router.route_all()) {
-        std::cerr << "[ERROR] 全局布线算法执行异常!\n";
-        return 1;
-    }
-
-    // 5. 导出合规的 Route Guide 结果
-    std::cout << "[PHASE 5] 正在导出 ISPD Route Guide: " << output_file << " ...\n";
-    if (!router.export_guide(output_file)) {
-        std::cerr << "[ERROR] 导出 Route Guide 失败!\n";
-        return 1;
-    }
-
-    auto end_time = std::chrono::steady_clock::now();
-    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
-
-    std::cout << "===============================================================\n";
-    std::cout << "[SUCCESS] 基线 Guide 已导出! 总耗时: " << elapsed << " ms\n";
-    std::cout << "===============================================================\n";
-
-    return 0;
+        std::cout<<"[SUCCESS] Guide exported: "<<output<<"\n";return 0;
+    } catch(const std::exception& e) {std::cerr<<"[ERROR] "<<e.what()<<"\n";return 1;}
 }

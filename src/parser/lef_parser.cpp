@@ -4,6 +4,39 @@
 
 namespace eda {
 namespace {
+LayerRect read_rect(TextTokens& t, const std::string& layer) {
+    const double x1 = t.number(), y1 = t.number(), x2 = t.number(), y2 = t.number();
+    t.expect(";");
+    if (layer.empty() || x2 <= x1 || y2 <= y1)
+        throw std::runtime_error("invalid LEF RECT on layer " + layer);
+    return {layer, Rect(x1, y1, x2, y2)};
+}
+std::vector<LayerRect> parse_shapes(TextTokens& t) {
+    std::vector<LayerRect> shapes;
+    std::string layer;
+    while (t.peek() != "END") {
+        const auto key = t.take();
+        if (key == "LAYER") { layer = t.take(); t.expect(";"); }
+        else if (key == "RECT") shapes.push_back(read_rect(t, layer));
+        else throw std::runtime_error("unsupported LEF obstruction/via geometry: " + key);
+    }
+    return shapes;
+}
+ViaInfo parse_via(TextTokens& t) {
+    ViaInfo via; via.name = t.take();
+    if (t.peek() == "DEFAULT") { t.take(); via.is_default = true; }
+    std::string layer;
+    while (t.peek() != "END") {
+        const auto key = t.take();
+        if (key == "LAYER") { layer = t.take(); t.expect(";"); }
+        else if (key == "RECT") via.shapes.push_back(read_rect(t, layer));
+        else if (key == "RESISTANCE" || key == "PROPERTY" || key == "FOREIGN") t.skip_statement();
+        else throw std::runtime_error("unsupported VIA definition " + via.name + ": " + key);
+    }
+    t.expect("END"); t.expect(via.name);
+    if (via.shapes.empty()) throw std::runtime_error("VIA has no rectangles: " + via.name);
+    return via;
+}
 void parse_port(TextTokens& t, MacroPinInfo& pin) {
     std::string layer;
     while (t.peek() != "END") {
@@ -44,7 +77,8 @@ MacroInfo parse_macro(TextTokens& t) {
             if (!pin.has_rect || !macro.pins.emplace(pin.name, pin).second)
                 throw std::runtime_error("missing geometry or duplicate pin: " + pin.name);
         } else if (key == "OBS") {
-            while (t.peek() != "END") t.skip_statement();
+            auto shapes = parse_shapes(t);
+            macro.obstructions.insert(macro.obstructions.end(), shapes.begin(), shapes.end());
             t.expect("END");
         } else t.skip_statement();
     }
@@ -60,6 +94,8 @@ bool LefParser::parse(const std::string& lef_file_path) {
         // A failed additional --lefs file must not corrupt previously loaded data.
         auto directions = layer_directions_;
         auto macros = macros_;
+        auto layers = layers_;
+        auto vias = vias_;
         bool saw_content = false;
         while (!t.done()) {
             const auto key = t.take();
@@ -67,6 +103,7 @@ bool LefParser::parse(const std::string& lef_file_path) {
                 const auto name = t.take();
                 std::string type;
                 Direction direction = Direction::UNKNOWN;
+                double width = 0.0;
                 while (t.peek() != "END") {
                     const auto field = t.take();
                     if (field == "TYPE") { type = t.take(); t.expect(";"); }
@@ -76,6 +113,9 @@ bool LefParser::parse(const std::string& lef_file_path) {
                         else if (value == "VERTICAL") direction = Direction::VERTICAL;
                         else throw std::runtime_error("invalid layer DIRECTION: " + value);
                         t.expect(";");
+                    } else if (field == "WIDTH") {
+                        width = t.number(); t.expect(";");
+                        if (width <= 0) throw std::runtime_error("invalid layer WIDTH: " + name);
                     } else t.skip_statement();
                 }
                 t.expect("END"); t.expect(name);
@@ -85,13 +125,20 @@ bool LefParser::parse(const std::string& lef_file_path) {
                     if (!directions.emplace(name, direction).second)
                         throw std::runtime_error("duplicate routing layer: " + name);
                 }
+                if (!layers.emplace(name, LayerInfo{direction, width, type}).second)
+                    throw std::runtime_error("duplicate layer: " + name);
                 saw_content = true;
             } else if (key == "MACRO") {
                 auto macro = parse_macro(t);
                 if (!macros.emplace(macro.name, macro).second)
                     throw std::runtime_error("duplicate MACRO: " + macro.name);
                 saw_content = true;
-            } else if (key == "VIA" || key == "VIARULE" || key == "SITE") {
+            } else if (key == "VIA") {
+                auto via = parse_via(t);
+                if (!vias.emplace(via.name, via).second)
+                    throw std::runtime_error("duplicate VIA: " + via.name);
+                saw_content = true;
+            } else if (key == "VIARULE" || key == "SITE") {
                 t.skip_block(t.take()); saw_content = true;
             } else if (key == "UNITS" || key == "PROPERTYDEFINITIONS" || key == "SPACING") {
                 t.skip_block(key);
@@ -103,6 +150,8 @@ bool LefParser::parse(const std::string& lef_file_path) {
         if (!saw_content) throw std::runtime_error("no layer or macro definitions");
         layer_directions_ = std::move(directions);
         macros_ = std::move(macros);
+        layers_ = std::move(layers);
+        vias_ = std::move(vias);
         std::cout << "[INFO] LEF parsed: " << macros_.size() << " macros\n";
         return true;
     } catch (const std::exception& error) {
