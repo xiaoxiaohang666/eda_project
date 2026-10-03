@@ -56,10 +56,10 @@ double NegotiatedRouter::edge_cost(int a,int b,const NetRoute& own) const {
     const int u=it==usage_.end()?0:it->second;
     if(cap>=0) {
         result+=present_*marginal(u,cap);
-        auto h=edge_history_.find(key); if(h!=edge_history_.end()) result+=h->second;
+        auto h=edge_history_.find(key); if(h!=edge_history_.end()) result+=history_scale_*h->second;
     }
     if(!own.nodes.count(b))
-        result+=present_*marginal(demand_[b],graph_.guide_capacity(b))+guide_history_[b];
+        result+=present_*marginal(demand_[b],graph_.guide_capacity(b))+history_scale_*guide_history_[b];
     return result;
 }
 double NegotiatedRouter::access_cost(const PinAccess& a) const {
@@ -72,7 +72,7 @@ double NegotiatedRouter::access_cost(const PinAccess& a) const {
         for(int r=r0;r<=r1;++r) for(int c=c0;c<=c1;++c) {
             int n=graph_.node(c,r,get_layer_index(g.layer));
             if(n>=0 && touched.insert(n).second)
-                result+=present_*marginal(demand_[n],graph_.guide_capacity(n))+guide_history_[n];
+                result+=present_*marginal(demand_[n],graph_.guide_capacity(n))+history_scale_*guide_history_[n];
         }
     }
     return result;
@@ -238,7 +238,7 @@ void NegotiatedRouter::encode(size_t index,NetRoute& route) {
     route.guides.clear();route.length=0;route.vias=0;
     const auto& grid=graph_.grid();
     // Maximal preferred-direction runs partition the set of occupied GCells.
-    std::set<int> pending=route.nodes;
+    std::set<int> pending=route.explicit_geometry?std::set<int>{}:route.nodes;
     while(!pending.empty()) {
         const int n=*pending.begin();pending.erase(pending.begin());
         const int l=graph_.layer(n),c=graph_.col(n),r=graph_.row(n);
@@ -252,7 +252,7 @@ void NegotiatedRouter::encode(size_t index,NetRoute& route) {
         Rect a=grid.get_cell_rect(c,r),b=grid.get_cell_rect(horizontal?end:c,horizontal?r:end);
         route.guides.emplace_back(a.x1,a.y1,b.x2,b.y2,get_layer_name(l));
     }
-    for(auto key:route.edges) {auto [a,b]=edge_nodes(key);route.length+=graph_.edge_length(a,b);
+    if(!route.explicit_geometry) for(auto key:route.edges) {auto [a,b]=edge_nodes(key);route.length+=graph_.edge_length(a,b);
         if(graph_.layer(a)!=graph_.layer(b)) ++route.vias;}
     for(const auto& a:route.accesses) {
         route.guides.insert(route.guides.end(),a.guides.begin(),a.guides.end());
@@ -390,13 +390,27 @@ NetRoute NegotiatedRouter::build_route(size_t index,int slot) {
         for(auto e:r.edges) {auto [a,b]=edge_nodes(e);double cap=graph_.edge_capacity(a,b);if(cap<0) continue;
             auto it=usage_.find(e);int u=it==usage_.end()?0:it->second;
             physical+=std::max(0,u+1-int(cap))-std::max(0,u-int(cap));}
-        const double norm=r.measured.reference>0?r.measured.wirelength/r.measured.reference:100;
+        // During a replacement pass rank against the unchanged other nets:
+        // sum(W)/sum(R) is not the same objective as this net's W/R.
+        const double reference=external_reference_+r.measured.reference;
+        const double norm=reference>0?(external_wirelength_+r.measured.wirelength)/reference:100;
         return std::tuple(overflow,physical,norm,r.length,r.vias);
     };
     for(int variant=0;variant<2;++variant) try {
         auto trial=build_candidate(index,slot,variant);
         if(!best || local_key(trial)<local_key(*best)) best=std::move(trial);
     } catch(const std::exception& e) {failure=e.what();}
+    if(best && options_.pin_local && slot<0 && !timed_out()) {
+        for(auto& trial:pin_local_candidates(index)) {
+            // A useful direct access must reduce real routing work as well as
+            // the Guide proxy; never win solely by growing its HPWL denominator.
+            if(!best || (trial.length<=best->length+1e-6 &&
+                         trial.measured.wirelength<=best->measured.wirelength+1e-6 &&
+                         (trial.length<best->length-1e-6 ||
+                          trial.measured.wirelength<best->measured.wirelength-1e-6 || trial.vias<best->vias) &&
+                         local_key(trial)<local_key(*best))) best=std::move(trial);
+        }
+    }
     if(!best) throw std::runtime_error(def_.nets()[index].name+": "+failure);
     return std::move(*best);
 }
@@ -434,7 +448,7 @@ bool NegotiatedRouter::better(const CompleteMetrics& a,const CompleteMetrics& b)
 bool NegotiatedRouter::repair_forest(size_t index,int slot,NetRoute& trial) {
     // Keep pin access geometry and unaffected graph branches. A TSV relocation
     // with different terminal accesses uses the full-net fallback below.
-    if(slot!=routes_[index].slot) return false;
+    if(slot!=routes_[index].slot || routes_[index].explicit_geometry) return false;
     trial=routes_[index];
     std::set<int> terminals;
     for(const auto& a:trial.accesses) terminals.insert(a.node);
@@ -680,7 +694,8 @@ bool NegotiatedRouter::route_all() {
         validate_complete();initial_metrics_=best_metrics_=measure();complete_=true;
         std::cout<<"[INITIAL] nets="<<routes_.size()<<" slots="<<policy_.slots().size()<<" guide_overflow="<<best_metrics_.guide.overflow
                  <<" physical_overflow="<<best_metrics_.physical_overflow<<"\n";
-        run_rrr(options_.rrr_rounds);optimize_tsv();validate_complete();best_metrics_=measure();
+        run_rrr(options_.rrr_rounds);optimize_tsv();pre_recovery_metrics_=measure();
+        recover_wirelength();validate_complete();best_metrics_=measure();
         guides_.clear();for(size_t i=0;i<routes_.size();++i) guides_[def_.nets()[i].name]=routes_[i].guides;
         std::cout<<"[FINAL] guide_overflow="<<best_metrics_.guide.overflow<<" normalized="<<best_metrics_.guide.normalized
                  <<" TSV="<<best_metrics_.guide.tsv_count<<" expansions="<<counters_.expansions<<"\n";
@@ -728,11 +743,15 @@ bool NegotiatedRouter::export_stats(const std::string& path) const {
         };
         out<<"{\n\"policy\":\"one aligned TSV per cross net; slot capacity 1; fixed-pin compatible Guide mapping\",\n\"metrics\":";
         metrics(best_metrics_);out<<",\n\"initial_metrics\":";metrics(initial_metrics_);
+        out<<",\n\"pre_recovery_metrics\":";metrics(pre_recovery_metrics_);
         out<<",\n\"counters\":{\"expansions\":"<<counters_.expansions<<",\"rrr_attempted\":"<<counters_.rrr_attempted
            <<",\"rrr_accepted\":"<<counters_.rrr_accepted<<",\"rollbacks\":"<<counters_.rollbacks
            <<",\"tsv_trials\":"<<counters_.tsv_trials<<",\"tsv_accepted\":"<<counters_.tsv_accepted
            <<",\"policy_rejections\":"<<counters_.policy_rejections<<",\"local_repairs\":"<<counters_.local_repairs
-           <<",\"templates_used\":"<<counters_.templates_used<<"},\n\"assignment\":[";
+           <<",\"templates_used\":"<<counters_.templates_used
+           <<",\"pin_local_candidates\":"<<counters_.pin_local_candidates
+           <<",\"wirelength_trials\":"<<counters_.wirelength_trials
+           <<",\"wirelength_accepted\":"<<counters_.wirelength_accepted<<"},\n\"assignment\":[";
         bool first=true;for(size_t i=0;i<routes_.size();++i) if(routes_[i].slot>=0) {
             if(!first) out<<',';
             first=false;const auto& s=policy_.slots()[routes_[i].slot];
@@ -746,7 +765,8 @@ bool NegotiatedRouter::export_stats(const std::string& path) const {
         }
         out<<"},\n\"options\":{\"rrr_rounds\":"<<options_.rrr_rounds<<",\"tsv_rounds\":"<<options_.tsv_rounds
            <<",\"local_repair\":"<<(options_.local_repair?"true":"false")<<",\"search\":"<<json_string(options_.dijkstra?"dijkstra":"astar")
-           <<",\"search_limit\":"<<options_.search_limit<<",\"time_limit_seconds\":"<<options_.time_limit<<"},\n";
+           <<",\"search_limit\":"<<options_.search_limit<<",\"time_limit_seconds\":"<<options_.time_limit
+           <<",\"wirelength_rounds\":"<<options_.wirelength_rounds<<",\"pin_local\":"<<(options_.pin_local?"true":"false")<<"},\n";
 #if defined(__linux__)
         struct rusage resource_usage{};
         if(getrusage(RUSAGE_SELF,&resource_usage)==0) out<<"\"peak_rss_kb\":"<<resource_usage.ru_maxrss<<",\n";

@@ -9,12 +9,13 @@
 
 namespace {
 void usage(const char* p) {
-    std::cout<<"3D IC Global Router v1\nUsage: "<<p<<" --def FILE --lef FILE --thermal-report FILE --output FILE\n"
+    std::cout<<"3D IC Global Router v2\nUsage: "<<p<<" --def FILE --lef FILE --thermal-report FILE --output FILE\n"
         <<"Input aliases: --input-def, --lefs (repeatable), --thermal-json, -o\n"
         <<"--router negotiated|baseline  (default negotiated)\n"
         <<"--rrr-rounds N  --tsv-rounds N  (defaults 30, 10)\n"
         <<"--search astar|dijkstra  --search-limit N (per search, default 250000)\n"
         <<"--time-limit SECONDS (default 120)  --local-repair 0|1 (default 1)\n"
+        <<"--wirelength-rounds N (default 3)  --pin-local 0|1 (default 1)\n"
         <<"--stats FILE  Write metrics, TSV policy, assignment and search counters\n";
 }
 int integer(const std::string& value,bool positive=false) {
@@ -35,7 +36,7 @@ int main(int argc,char** argv) {
         for(int i=1;i<argc;++i) {
             std::string arg=argv[i];if(arg=="--help"||arg=="-h") {usage(argv[0]);return 0;}
             const std::set<std::string> recognized={"--def","--input-def","--lef","--lefs","--thermal-report","--thermal-json",
-                "--output","-o","--stats","--router","--rrr-rounds","--tsv-rounds","--search","--time-limit","--search-limit","--local-repair"};
+                "--output","-o","--stats","--router","--rrr-rounds","--tsv-rounds","--search","--time-limit","--search-limit","--local-repair","--wirelength-rounds","--pin-local"};
             if(!recognized.count(arg)) throw std::runtime_error("unknown option: "+arg);
             if(i+1>=argc) throw std::runtime_error("missing option value: "+arg);
             const std::string value=argv[++i];if(value.empty()||value[0]=='-') throw std::runtime_error("invalid option value: "+arg);
@@ -47,6 +48,8 @@ int main(int argc,char** argv) {
             else if(arg=="--router") {if(value!="baseline"&&value!="negotiated") throw std::runtime_error("invalid router");kind=value;}
             else if(arg=="--rrr-rounds") options.rrr_rounds=integer(value);
             else if(arg=="--tsv-rounds") options.tsv_rounds=integer(value);
+            else if(arg=="--wirelength-rounds") options.wirelength_rounds=integer(value);
+            else if(arg=="--pin-local") {int v=integer(value);if(v>1) throw std::runtime_error("pin-local must be 0 or 1");options.pin_local=v;}
             else if(arg=="--search-limit") options.search_limit=size_t(integer(value,true));
             else if(arg=="--local-repair") {int v=integer(value);if(v>1) throw std::runtime_error("local-repair must be 0 or 1");options.local_repair=v;}
             else if(arg=="--search") {if(value!="astar"&&value!="dijkstra") throw std::runtime_error("invalid search");options.dijkstra=value=="dijkstra";}

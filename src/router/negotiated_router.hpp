@@ -8,14 +8,15 @@
 
 namespace eda {
 struct RouterOptions {
-    int rrr_rounds{30}, tsv_rounds{10};
+    int rrr_rounds{30}, tsv_rounds{10}, wirelength_rounds{3};
     size_t search_limit{250000};
     double time_limit{120};
-    bool dijkstra{false}, local_repair{true};
+    bool dijkstra{false}, local_repair{true}, pin_local{true};
 };
 struct RouterCounters {
     size_t expansions{}, rrr_attempted{}, rrr_accepted{}, rollbacks{}, tsv_trials{},
-           tsv_accepted{}, policy_rejections{}, local_repairs{}, templates_used{};
+           tsv_accepted{}, policy_rejections{}, local_repairs{}, templates_used{},
+           pin_local_candidates{}, wirelength_trials{}, wirelength_accepted{};
 };
 // One undirected resource key; a Net consumes each resource only once.
 using EdgeKey = uint64_t;
@@ -33,6 +34,9 @@ struct PinAccess {
     int vias{};
 };
 struct NetRoute {
+    // Explicit terminal-to-terminal geometry still reserves the crossed graph
+    // resources, but must not emit a second path through their GCell centers.
+    bool explicit_geometry{false};
     std::set<int> nodes;
     std::set<EdgeKey> edges;
     std::vector<PinAccess> accesses;
@@ -66,6 +70,7 @@ public:
     PathResult search(const std::vector<PinAccess>& sources, const std::set<int>& targets,
                       const NetRoute& own, int low, int high, bool dijkstra);
 private:
+    friend struct PinLocalTestAccess;
     const DefParser& def_;
     const LefParser& lef_;
     const ThermalParser& thermal_;
@@ -81,11 +86,13 @@ private:
     std::vector<double> guide_history_;
     std::unordered_map<EdgeKey,double> edge_history_;
     std::map<std::tuple<double,double,int,int,int>,std::vector<PinAccess>> access_cache_;
-    CompleteMetrics best_metrics_, initial_metrics_;
+    CompleteMetrics best_metrics_, initial_metrics_, pre_recovery_metrics_;
     RouterCounters counters_;
     std::map<std::string,size_t> rejection_reasons_;
     std::chrono::steady_clock::time_point started_, deadline_;
     double present_{1};
+    double history_scale_{1};
+    double external_wirelength_{0}, external_reference_{0};
     bool complete_{false};
     bool timed_out() const;
     double edge_cost(int,int,const NetRoute&) const;
@@ -93,6 +100,7 @@ private:
     std::vector<PinAccess> accesses(Point,int,int,int);
     NetRoute build_candidate(size_t,int,int);
     NetRoute build_route(size_t,int);
+    std::vector<NetRoute> pin_local_candidates(size_t);
     void encode(size_t,NetRoute&);
     void account(size_t,const NetRoute&,int);
     CompleteMetrics measure() const;
@@ -100,6 +108,7 @@ private:
     bool rrr_round(const std::vector<size_t>&);
     void run_rrr(int);
     void optimize_tsv();
+    void recover_wirelength();
     bool repair_forest(size_t,int,NetRoute&);
     void validate_complete() const;
 };

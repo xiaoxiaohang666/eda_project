@@ -90,7 +90,7 @@ class AlgorithmTests(unittest.TestCase):
     def setUpClass(cls):
         cls.folder = tempfile.TemporaryDirectory(prefix="eda-algorithm-", dir=BINARY.parent.parent)
         cls.directory = Path(cls.folder.name)
-        cls.initial = cls.route("initial", ["--rrr-rounds", "0", "--tsv-rounds", "0"])
+        cls.initial = cls.route("initial", ["--rrr-rounds", "0", "--tsv-rounds", "0", "--wirelength-rounds", "0"])
         cls.full = cls.route("full", [])
         cls.repeat = cls.route("repeat", [])
 
@@ -101,9 +101,9 @@ class AlgorithmTests(unittest.TestCase):
     @classmethod
     def route(cls, name, options):
         guide, stats = cls.directory / (name + ".guide"), cls.directory / (name + ".json")
-        command = [str(BINARY), *INPUTS, "--router", "negotiated", "--time-limit", "120",
+        command = [str(BINARY), *INPUTS, "--router", "negotiated", "--time-limit", "600",
                    "--output", str(guide), "--stats", str(stats), *options]
-        result = subprocess.run(command, capture_output=True, text=True, timeout=150)
+        result = subprocess.run(command, capture_output=True, text=True, timeout=650)
         if result.returncode:
             raise AssertionError(result.stdout + result.stderr)
         return guide, json.loads(stats.read_text(encoding="utf-8"))
@@ -203,7 +203,7 @@ class AlgorithmTests(unittest.TestCase):
         self.assertEqual(count, 6)
         path = self.directory / "movable.def"
         path.write_text(fixture)
-        common = ["--def", str(path), "--rrr-rounds", "0"]
+        common = ["--def", str(path), "--rrr-rounds", "0", "--wirelength-rounds", "0", "--pin-local", "0"]
         prefix = self.route("movable-prefix", [*common, "--tsv-rounds", "2"])
         full = self.route("movable-full", [*common, "--tsv-rounds", "10"])
         repeated = self.route("movable-repeat", [*common, "--tsv-rounds", "10"])

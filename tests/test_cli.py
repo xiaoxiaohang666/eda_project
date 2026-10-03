@@ -22,7 +22,11 @@ SUBMISSION_INPUTS = [
 
 class CliTests(unittest.TestCase):
     def run_cli(self, args, success=False):
-        result = subprocess.run([str(BINARY), *args], capture_output=True, text=True, timeout=30)
+        # Sanitized unoptimized builds are much slower than Release. Successful
+        # compatibility replays must finish their deterministic search schedule.
+        if success and "--help" not in args:
+            args = [*args, "--time-limit", "600"]
+        result = subprocess.run([str(BINARY), *args], capture_output=True, text=True, timeout=650)
         if success:
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         else:
