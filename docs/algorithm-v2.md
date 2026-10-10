@@ -1,6 +1,6 @@
 # 第二版：真实端点直连与逐网线长恢复
 
-日期：2026-10-03。分支 `codex/algorithm-v2-wirelength`，从第一版 `fe9b979` 创建。代码、构建和测试均在 `.`；保留 `llh` 的第一版。第一版教学见 [详细指南](algorithm-v1-detailed-guide.md)。
+日期：2026-10-03。分支 `llh-version2`，从第一版 `fe9b979` 创建。代码、构建和测试均在 `.`；保留 `llh` 的第一版。第一版教学见 [详细指南](algorithm-v1-detailed-guide.md)。
 
 ## 为什么选这两个方向
 
