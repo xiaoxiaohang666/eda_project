@@ -20,6 +20,15 @@ ROOT = Path(__file__).resolve().parents[1]
 CASE = ROOT / "benchmarks/sample001"
 
 
+def disable_tsv_local(binary):
+    """Preserve v2 semantics on newer binaries, while accepting frozen v1/v2."""
+    result = subprocess.run([str(binary.resolve()), "--help"], capture_output=True,
+                            text=True, timeout=30)
+    if result.returncode:
+        raise ValueError(f"unable to inspect binary options: {binary}")
+    return ["--tsv-local", "0"] if "--tsv-local" in result.stdout else []
+
+
 def comparison_key(metrics):
     return (metrics["guide_overflow"], metrics["physical_overflow"],
             -metrics["quality"], metrics["physical_length_dbu"], metrics["ordinary_vias"])
@@ -115,13 +124,14 @@ def main():
         summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         write_report(out, summary)
 
+    tsv_disabled = disable_tsv_local(args.v2_binary)
     rounds = str(args.wirelength_rounds)
     variants = [
         ("frozen_v1", args.v1_binary, []),
-        ("v2_disabled", args.v2_binary, ["--pin-local", "0", "--wirelength-rounds", "0"]),
-        ("pin_local", args.v2_binary, ["--pin-local", "1", "--wirelength-rounds", "0"]),
-        ("recovery", args.v2_binary, ["--pin-local", "0", "--wirelength-rounds", rounds]),
-        ("full", args.v2_binary, ["--pin-local", "1", "--wirelength-rounds", rounds]),
+        ("v2_disabled", args.v2_binary, ["--pin-local", "0", "--wirelength-rounds", "0", *tsv_disabled]),
+        ("pin_local", args.v2_binary, ["--pin-local", "1", "--wirelength-rounds", "0", *tsv_disabled]),
+        ("recovery", args.v2_binary, ["--pin-local", "0", "--wirelength-rounds", rounds, *tsv_disabled]),
+        ("full", args.v2_binary, ["--pin-local", "1", "--wirelength-rounds", rounds, *tsv_disabled]),
     ]
     save()
     try:

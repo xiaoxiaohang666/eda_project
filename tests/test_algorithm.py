@@ -90,7 +90,13 @@ class AlgorithmTests(unittest.TestCase):
     def setUpClass(cls):
         cls.folder = tempfile.TemporaryDirectory(prefix="eda-algorithm-", dir=BINARY.parent.parent)
         cls.directory = Path(cls.folder.name)
-        cls.initial = cls.route("initial", ["--rrr-rounds", "0", "--tsv-rounds", "0", "--wirelength-rounds", "0"])
+        # Initial metrics precede every optional optimization stage. Frozen
+        # earlier binaries do not advertise the v3 switch.
+        help_result = subprocess.run([str(BINARY), "--help"], capture_output=True,
+                                     text=True, timeout=30)
+        tsv_disabled = ["--tsv-local", "0"] if "--tsv-local" in help_result.stdout else []
+        cls.initial = cls.route("initial", ["--rrr-rounds", "0", "--tsv-rounds", "0",
+                                            "--wirelength-rounds", "0", *tsv_disabled])
         cls.full = cls.route("full", [])
         cls.repeat = cls.route("repeat", [])
 

@@ -24,12 +24,13 @@ args, remaining = arguments.parse_known_args()
 BINARY, V1 = args.binary.resolve(), args.v1_binary.resolve()
 sys.argv = [sys.argv[0], *remaining]
 sys.path.insert(0, str(ROOT / "scripts"))
-from compare_router_versions import nonworsening
+from compare_router_versions import disable_tsv_local, nonworsening
 # Reuse the independent Python rectangle-demand/TSV oracle. That test module
 # takes its binary argument at import; isolate its argument parsing here.
 with patch.object(sys, "argv", [sys.argv[0], str(BINARY)]):
     from test_algorithm import guide_accounting, parse_guide
 
+TSV_DISABLED = disable_tsv_local(BINARY)
 DISABLED = ["--pin-local", "0", "--wirelength-rounds", "0"]
 INPUTS = ["--def", str(CASE / "sample001.input.def"),
           "--lef", str(CASE / "sample001.input.lef"),
@@ -55,6 +56,8 @@ class V2Tests(unittest.TestCase):
     @classmethod
     def route(cls, name, options, binary=BINARY, time_limit=600):
         guide, stats = cls.directory / (name + ".guide"), cls.directory / (name + ".json")
+        if binary == BINARY:
+            options = [*options, *TSV_DISABLED]
         command = [str(binary), *INPUTS, "--router", "negotiated", "--time-limit", str(time_limit),
                    "--output", str(guide), "--stats", str(stats), *options]
         result = subprocess.run(command, capture_output=True, text=True, timeout=time_limit + 90)
@@ -91,6 +94,10 @@ class V2Tests(unittest.TestCase):
         self.assertEqual(self.full[1]["metrics"]["guide_overflow"], 0)
         self.assertEqual(self.full[1]["metrics"]["physical_overflow"], 0)
         self.assertEqual(self.full[1]["metrics"]["physical_tsv_count"], 3)
+        if TSV_DISABLED:
+            self.assertEqual(self.full[1]["options"]["tsv_local"], 0)
+            for key in ("tsv_local_candidates", "tsv_local_trials", "tsv_local_accepted"):
+                self.assertEqual(self.full[1]["counters"][key], 0, key)
 
     def test_recovery_preserves_complete_solution_order(self):
         for name, before, after in [("grid recovery", self.disabled, self.recovery),

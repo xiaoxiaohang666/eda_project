@@ -11,12 +11,13 @@ struct RouterOptions {
     int rrr_rounds{30}, tsv_rounds{10}, wirelength_rounds{3};
     size_t search_limit{250000};
     double time_limit{120};
-    bool dijkstra{false}, local_repair{true}, pin_local{true};
+    bool dijkstra{false}, local_repair{true}, pin_local{true}, tsv_local{true};
 };
 struct RouterCounters {
     size_t expansions{}, rrr_attempted{}, rrr_accepted{}, rollbacks{}, tsv_trials{},
            tsv_accepted{}, policy_rejections{}, local_repairs{}, templates_used{},
-           pin_local_candidates{}, wirelength_trials{}, wirelength_accepted{};
+           pin_local_candidates{}, wirelength_trials{}, wirelength_accepted{},
+           tsv_local_candidates{}, tsv_local_trials{}, tsv_local_accepted{};
 };
 // One undirected resource key; a Net consumes each resource only once.
 using EdgeKey = uint64_t;
@@ -86,7 +87,7 @@ private:
     std::vector<double> guide_history_;
     std::unordered_map<EdgeKey,double> edge_history_;
     std::map<std::tuple<double,double,int,int,int>,std::vector<PinAccess>> access_cache_;
-    CompleteMetrics best_metrics_, initial_metrics_, pre_recovery_metrics_;
+    CompleteMetrics best_metrics_, initial_metrics_, pre_recovery_metrics_, pre_tsv_local_metrics_;
     RouterCounters counters_;
     std::map<std::string,size_t> rejection_reasons_;
     std::chrono::steady_clock::time_point started_, deadline_;
@@ -101,6 +102,7 @@ private:
     NetRoute build_candidate(size_t,int,int);
     NetRoute build_route(size_t,int);
     std::vector<NetRoute> pin_local_candidates(size_t);
+    std::vector<NetRoute> terminal_pair_candidates(const Pin&,const Pin&,int,int);
     void encode(size_t,NetRoute&);
     void account(size_t,const NetRoute&,int);
     CompleteMetrics measure() const;
@@ -109,6 +111,7 @@ private:
     void run_rrr(int);
     void optimize_tsv();
     void recover_wirelength();
+    void recover_tsv_local();
     bool repair_forest(size_t,int,NetRoute&);
     void validate_complete() const;
 };

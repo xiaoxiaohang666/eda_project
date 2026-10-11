@@ -11,6 +11,18 @@ std::vector<NetRoute> NegotiatedRouter::pin_local_candidates(size_t index) {
     const auto& first=net.pins[0];const auto& last=net.pins[1];
     const int low=first.layer_idx<=10?1:11,high=low+9;
     if(last.layer_idx<low || last.layer_idx>high) return result;
+    for(auto& route:terminal_pair_candidates(first,last,low,high)) {
+        try {encode(index,route);++counters_.pin_local_candidates;result.push_back(std::move(route));}
+        catch(const std::runtime_error&) { /* Keep the searched route available. */ }
+    }
+    return result;
+}
+
+// Geometry-only building block shared by same-die and future TSV-side routing.
+// Encoding a whole net belongs to the caller, after all terminals are included.
+std::vector<NetRoute> NegotiatedRouter::terminal_pair_candidates(
+        const Pin& first,const Pin& last,int low,int high) {
+    std::vector<NetRoute> result;
     const auto& grid=graph_.grid();
     // These candidates follow the actual terminal coordinates. Unlike a
     // center-grid path, a short net need not make two detours to cell centers.
@@ -79,8 +91,7 @@ std::vector<NetRoute> NegotiatedRouter::pin_local_candidates(size_t index) {
         if(!ok||!stack(b,layer,last.layer_idx)||!segment(b,b,last.layer_idx)) return std::nullopt;
         geometry.node=node_at(first.coord,first.layer_idx);
         route.accesses.push_back(std::move(geometry));
-        encode(index,route);
-        ++counters_.pin_local_candidates;return route;
+        return route;
     };
     std::vector<std::tuple<int,int,int>> pairs;
     for(int h=low;h<=high;++h) if(lef_.get_layer_direction(get_layer_name(h))==Direction::HORIZONTAL)

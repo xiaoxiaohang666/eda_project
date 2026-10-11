@@ -76,6 +76,9 @@ if(BUILD_TESTING)
     add_test(NAME algorithm_v2 COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_v2.py" "$<TARGET_FILE:eda_router>")
 
+    add_test(NAME algorithm_v3 COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_v3.py" "$<TARGET_FILE:eda_router>")
+
     add_executable(pin_local_tests tests/pin_local_tests.cpp)
     target_link_libraries(pin_local_tests PRIVATE eda_core)
     add_test(NAME pin_local COMMAND pin_local_tests "${CMAKE_CURRENT_SOURCE_DIR}"
