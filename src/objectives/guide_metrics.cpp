@@ -125,16 +125,27 @@ PearsonState::PearsonState(std::vector<double> heat, std::vector<int> counts)
         count_sum_ += t; count_square_ += t * t; product_ += h * t;
     }
 }
-double PearsonState::correlation() const {
+double PearsonState::correlation_with(long double count_square, long double product) const {
     if (heat_sum_ <= 0 || count_sum_ <= 0) return 0.0;
     const long double n = static_cast<long double>(heat_.size());
     const long double vh = std::max(0.0L, heat_square_ - heat_sum_ * heat_sum_ / n);
-    const long double vt = std::max(0.0L, count_square_ - count_sum_ * count_sum_ / n);
+    const long double vt = std::max(0.0L, count_square - count_sum_ * count_sum_ / n);
     const long double denominator = std::sqrt(vh) * std::sqrt(vt);
     // score.py checks the denominator AFTER normalizing each vector to unit sum.
     if (denominator <= 1e-15L * heat_sum_ * count_sum_) return 0.0;
-    const long double numerator = product_ - heat_sum_ * count_sum_ / n;
+    const long double numerator = product - heat_sum_ * count_sum_ / n;
     return std::clamp(static_cast<double>(numerator / denominator), -1.0, 1.0);
+}
+double PearsonState::correlation() const {
+    return correlation_with(count_square_, product_);
+}
+double PearsonState::correlation_after_move(size_t from, size_t to) const {
+    if (from >= counts_.size() || to >= counts_.size() || counts_[from] <= 0)
+        throw std::runtime_error("invalid incremental TSV move");
+    if (from == to) return correlation();
+    const long double square = count_square_ + (2.0L * (counts_[to] - counts_[from]) + 2.0L);
+    const long double product = product_ + (static_cast<long double>(heat_[to]) - heat_[from]);
+    return correlation_with(square, product);
 }
 void PearsonState::move(int from, int to) {
     if (from < 0 || to < 0 || from >= static_cast<int>(counts_.size()) || to >= static_cast<int>(counts_.size()) || counts_[from] <= 0)
@@ -177,6 +188,60 @@ GuideMetrics evaluate_guides(const GuideMap& guides, const RoutingGraph& graph,
     result.normalized = result.reference > 0 ? result.wirelength / result.reference : 100.0;
     if (result.tsv_count == 0) throw std::runtime_error("no TSVs available for full evaluator metrics");
     if (std::none_of(heat.begin(),heat.end(),[](double h){return h>0;}))
+        throw std::runtime_error("thermal map contains no temperature rise above ambient");
+    result.correlation = PearsonState(std::move(heat), std::move(counts)).correlation();
+    result.quality = 0.45 / std::max(1.0, result.normalized) +
+                     0.30 * std::max(0.0, 1.0 - result.overflow / 20.0) +
+                     0.25 * (result.correlation + 1.0) / 2.0;
+    return result;
+}
+
+GuideMetrics aggregate_cached_metrics(const std::vector<const NetGuideMetrics*>& nets,
+                                     const std::vector<int>& aggregate_demand,
+                                     const RoutingGraph& graph, const ThermalParser& thermal,
+                                     bool capture_demand) {
+    if (aggregate_demand.size() != graph.size())
+        throw std::runtime_error("cached guide demand dimensions do not match routing graph");
+    GuideMetrics result;
+    if (capture_demand) result.demand = aggregate_demand;
+    const auto& grid = graph.grid();
+    std::vector<double> heat(static_cast<size_t>(grid.cols) * grid.rows);
+    std::vector<int> counts(heat.size(), 0);
+    for (int row = 0; row < grid.rows; ++row)
+        for (int col = 0; col < grid.cols; ++col)
+            heat[static_cast<size_t>(row) * grid.cols + col] =
+                std::max(0.0, thermal.get_temperature(col, row) - thermal.ambient_temperature());
+    for (const auto* net : nets) {
+        if (!net || !net->connected || !std::isfinite(net->wirelength) || net->wirelength < 0 ||
+            !std::isfinite(net->reference) || net->reference < 0)
+            throw std::runtime_error("invalid cached net guide metrics");
+        result.wirelength += net->wirelength;
+        result.reference += net->reference;
+        for (const int cell : net->tsv_cells) {
+            if (cell < 0 || static_cast<size_t>(cell) >= counts.size())
+                throw std::runtime_error("cached TSV cell is outside thermal grid");
+            if (counts[cell] == std::numeric_limits<int>::max() ||
+                result.tsv_count == std::numeric_limits<int>::max())
+                throw std::runtime_error("cached TSV count overflows");
+            ++counts[cell]; ++result.tsv_count;
+        }
+    }
+    if (!std::isfinite(result.wirelength) || !std::isfinite(result.reference))
+        throw std::runtime_error("cached guide length sum overflows");
+    for (size_t node = 0; node < aggregate_demand.size(); ++node) {
+        const int demand = aggregate_demand[node];
+        if (demand < 0) throw std::runtime_error("cached guide demand is negative");
+        if (!demand) continue;
+        ++result.used_cells;
+        const int excess = std::max(0, demand - int(graph.guide_capacity(static_cast<int>(node))));
+        if (result.overflow > std::numeric_limits<int>::max() - excess)
+            throw std::runtime_error("cached guide overflow count overflows");
+        result.overflow += excess;
+        result.max_overflow = std::max(result.max_overflow, excess);
+    }
+    result.normalized = result.reference > 0 ? result.wirelength / result.reference : 100.0;
+    if (!result.tsv_count) throw std::runtime_error("no TSVs available for full evaluator metrics");
+    if (std::none_of(heat.begin(), heat.end(), [](double h) { return h > 0; }))
         throw std::runtime_error("thermal map contains no temperature rise above ambient");
     result.correlation = PearsonState(std::move(heat), std::move(counts)).correlation();
     result.quality = 0.45 / std::max(1.0, result.normalized) +

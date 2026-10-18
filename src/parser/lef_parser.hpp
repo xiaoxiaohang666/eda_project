@@ -23,6 +23,9 @@ struct ViaInfo {
     std::string name;
     std::vector<LayerRect> shapes;
     bool is_default{false};
+    // Restricted to the top of a stacked via. Generic routing must exclude it
+    // until a stack-aware legality model can enforce this qualifier.
+    bool top_of_stack_only{false};
 };
 
 struct MacroPinInfo {
@@ -30,6 +33,9 @@ struct MacroPinInfo {
     std::string layer;
     Rect bbox;
     bool has_rect{false};
+    // Keep disconnected and multilayer PORT rectangles individually; bbox is
+    // still the first rectangle for compatibility with existing checker code.
+    std::vector<LayerRect> port_rects;
 };
 
 struct MacroInfo {
@@ -39,6 +45,8 @@ struct MacroInfo {
     Point origin;
     std::unordered_map<std::string, MacroPinInfo> pins;
     std::vector<LayerRect> obstructions;
+    std::string macro_class; // LEF main CLASS, e.g. CORE or BLOCK; empty if absent.
+    std::string macro_subclass;
 };
 
 class LefParser {

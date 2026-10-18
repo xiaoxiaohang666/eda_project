@@ -7,7 +7,7 @@ namespace {
 LayerRect read_rect(TextTokens& t, const std::string& layer) {
     const double x1 = t.number(), y1 = t.number(), x2 = t.number(), y2 = t.number();
     t.expect(";");
-    if (layer.empty() || x2 <= x1 || y2 <= y1)
+    if (layer.empty() || x2 == x1 || y2 == y1)
         throw std::runtime_error("invalid LEF RECT on layer " + layer);
     return {layer, Rect(x1, y1, x2, y2)};
 }
@@ -28,7 +28,12 @@ ViaInfo parse_via(TextTokens& t) {
     std::string layer;
     while (t.peek() != "END") {
         const auto key = t.take();
-        if (key == "LAYER") { layer = t.take(); t.expect(";"); }
+        if (key == "TOPOFSTACKONLY") {
+            if (via.top_of_stack_only)
+                throw std::runtime_error("duplicate TOPOFSTACKONLY on VIA " + via.name);
+            via.top_of_stack_only = true;
+        }
+        else if (key == "LAYER") { layer = t.take(); t.expect(";"); }
         else if (key == "RECT") via.shapes.push_back(read_rect(t, layer));
         else if (key == "RESISTANCE" || key == "PROPERTY" || key == "FOREIGN") t.skip_statement();
         else throw std::runtime_error("unsupported VIA definition " + via.name + ": " + key);
@@ -46,8 +51,9 @@ void parse_port(TextTokens& t, MacroPinInfo& pin) {
         } else if (key == "RECT") {
             const double x1 = t.number(), y1 = t.number(), x2 = t.number(), y2 = t.number();
             t.expect(";");
-            if (layer.empty() || x2 <= x1 || y2 <= y1)
+            if (layer.empty() || x2 == x1 || y2 == y1)
                 throw std::runtime_error("invalid RECT in pin " + pin.name);
+            pin.port_rects.push_back({layer, Rect(x1, y1, x2, y2)});
             // Select a real rectangle, never a bounding box across disconnected shapes.
             // The package checker also uses the first rectangle.
             if (!pin.has_rect) {
@@ -65,6 +71,14 @@ MacroInfo parse_macro(TextTokens& t) {
         const auto key = t.take();
         if (key == "SIZE") {
             macro.width = t.number(); t.expect("BY"); macro.height = t.number(); t.expect(";");
+        } else if (key == "CLASS") {
+            if (!macro.macro_class.empty()) throw std::runtime_error("duplicate CLASS in macro " + macro.name);
+            macro.macro_class = t.take();
+            while (t.peek() != ";") {
+                if (!macro.macro_subclass.empty()) macro.macro_subclass += " ";
+                macro.macro_subclass += t.take();
+            }
+            t.expect(";");
         } else if (key == "ORIGIN") {
             macro.origin.x = t.number(); macro.origin.y = t.number(); t.expect(";");
         } else if (key == "PIN") {

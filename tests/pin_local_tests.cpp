@@ -56,6 +56,13 @@ struct PinLocalTestAccess {
         const auto candidates=router.pin_local_candidates(0);
         if(blocked) {
             require(candidates.empty(),"OBS wall rejects every monotone direct template");
+            if(!router.graph_.legal_segment(a,a,la)) {
+                const auto escapes=router.accesses(a,la,la<=10?1:11,la<=10?10:20);
+                require(!escapes.empty(),"flat terminal cap escapes without shrinking LEF width");
+                for(const auto& access:escapes) for(const auto& g:access.guides)
+                    require(router.graph_.legal_rect({g.x1,g.y1,g.x2,g.y2},get_layer_index(g.layer)),
+                            "every terminal escape guide avoids all OBS");
+            }
             const auto searched=router.build_route(0,-1);
             require(!searched.explicit_geometry,"blocked local route falls back to grid search");
             require(searched.length>a.distance_to(b),"wall fallback must make a physical detour");
@@ -89,13 +96,30 @@ struct PinLocalTestAccess {
             require(shortest->edges.count(e),"actual horizontal boundary reserves the expected edge");
             require(shortest->edges.size()==1,"single straight crossing consumes exactly one resource");
             const int capacity=int(router.graph_.edge_capacity(edge_nodes(e).first,edge_nodes(e).second));
-            for(int i=0;i<=capacity;++i) router.account(i,*shortest,1);
+            for(int i=capacity;i>=0;--i) router.account(i,*shortest,1);
             require(router.usage_.at(e)==capacity+1,"distinct local nets account physical overcapacity");
             require(router.edge_nets_.at(e).size()==size_t(capacity+1),"reverse ownership survives local routes");
+            require(std::is_sorted(router.edge_nets_.at(e).begin(),router.edge_nets_.at(e).end()),
+                    "reverse owners remain sorted after reverse-order insertion");
+            const auto before_demand=router.demand_;
+            bool duplicate_rejected=false;
+            try {router.account(0,*shortest,1);} catch(const std::logic_error&) {duplicate_rejected=true;}
+            require(duplicate_rejected&&router.demand_==before_demand&&router.usage_.at(e)==capacity+1,
+                    "duplicate owner account rejects before changing either ledger");
+            const int middle=capacity/2;
+            router.account(middle,*shortest,-1);
+            require(!std::binary_search(router.edge_nets_.at(e).begin(),router.edge_nets_.at(e).end(),middle),
+                    "middle owner ripup removes only that owner");
+            router.account(middle,*shortest,1);
             for(int i=capacity;i>=0;--i) router.account(i,*shortest,-1);
-            require(router.usage_.at(e)==0&&router.edge_nets_.at(e).empty(),"ripup restores physical count and ownership");
+            require(router.usage_.at(e)==0&&!router.edge_nets_.contains(e),"ripup restores physical count and releases owner bucket");
+            require(router.cell_nets_.empty(),"ripup releases empty reverse Guide ownership sets");
             require(std::all_of(router.demand_.begin(),router.demand_.end(),[](int x){return x==0;}),
                     "ripup restores exact Guide ledger");
+            bool missing_rejected=false;
+            try {router.account(0,*shortest,-1);} catch(const std::logic_error&) {missing_rejected=true;}
+            require(missing_rejected&&router.usage_.at(e)==0&&router.cell_nets_.empty(),
+                    "missing owner ripup rejects before changing ledgers");
         }
         router.routes_={*shortest};NetRoute repaired;
         require(!router.repair_forest(0,-1,repaired),"grid forest repair skips explicit terminal paths");
@@ -112,9 +136,17 @@ int main(int argc,char** argv) {
             {"horizontal_crossing",{60,60},{140,60},1,1,false,true},
             {"upper_die",{60,60},{65,70},20,20,false,false},
             {"via_stack",{60,60},{65,70},1,3,false,false},
-            {"obstacle",{60,150},{180,150},1,1,true,true}}) {
+            {"obstacle",{60,150},{180,150},1,1,true,true},
+            {"flat_terminal_escape",{135,150},{180,150},1,1,true,false}}) {
             LefParser lef;DefParser def;ThermalParser thermal;
-            require(lef.parse(write(folder/(c.name+".lef"),technology(c.blocked))),"LEF fixture parse");
+            auto tech=technology(c.blocked);
+            if(c.name=="flat_terminal_escape") {
+                size_t position=0;
+                while((position=tech.find("WIDTH 0.2",position))!=std::string::npos) {
+                    tech.replace(position,9,"WIDTH 1.6");position+=9;
+                }
+            }
+            require(lef.parse(write(folder/(c.name+".lef"),tech)),"LEF fixture parse");
             require(def.parse(write(folder/(c.name+".def"),design(c.a,c.b,c.la,c.lb,c.blocked)),lef),"DEF fixture parse");
             NegotiatedRouter router(def,lef,thermal);
             PinLocalTestAccess::check(router,def,lef,c.a,c.b,c.la,c.lb,c.blocked,c.crossing);

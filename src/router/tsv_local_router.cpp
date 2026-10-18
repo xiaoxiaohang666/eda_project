@@ -46,17 +46,17 @@ void NegotiatedRouter::recover_tsv_local() {
                     // Encode both sides together: all original pins and the
                     // one fixed interface witness must survive mapping checks.
                     encode(index,trial);++counters_.tsv_local_candidates;
-                    if(trial.length>old.length+1e-6||trial.vias>old.vias||
-                       trial.measured.wirelength>old.measured.wirelength+1e-6) continue;
+                    if(!options_.official_model && (trial.length>old.length+1e-6||trial.vias>old.vias||
+                       trial.measured.wirelength>old.measured.wirelength+1e-6)) continue;
                     if(timed_out()) break;
                     ++counters_.tsv_local_trials;
                     routes_[index]=trial;account(index,trial,1);accounted=true;
                     const auto after=measure();
-                    if(after.guide.overflow<=before.guide.overflow&&
+                    if((options_.official_model || (after.guide.overflow<=before.guide.overflow&&
                        after.physical_overflow<=before.physical_overflow&&
                        after.guide.wirelength<=before.guide.wirelength+1e-6&&
                        after.physical_length<=before.physical_length+1e-6&&after.vias<=before.vias&&
-                       after.guide.quality+1e-12>=before.guide.quality&&better(after,chosen_metrics)) {
+                       after.guide.quality+1e-12>=before.guide.quality)) && better(after,chosen_metrics)) {
                         validate_complete();chosen=std::move(trial);chosen_metrics=after;
                     }
                 } catch(const std::exception& e) {++rejection_reasons_[e.what()];}

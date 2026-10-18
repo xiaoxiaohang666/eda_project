@@ -71,7 +71,15 @@ Rect transform_macro_rect(const Rect& rect, const MacroInfo& macro,
     return {a.x, a.y, b.x, b.y};
 }
 
-bool DefParser::parse(const std::string& def_file_path, const LefParser& lef_parser) {
+Rect component_bbox(const MacroInfo& macro, const Component& component, double dbu_per_micron) {
+    // Removing ORIGIN here gives the true placement SIZE box. ORIGIN continues
+    // to shift terminal/obstruction geometry through transform_macro_rect.
+    return transform_macro_rect({-macro.origin.x, -macro.origin.y,
+                                 macro.width - macro.origin.x, macro.height - macro.origin.y},
+                                macro, component, dbu_per_micron);
+}
+
+bool DefParser::parse(const std::string& def_file_path, const LefParser& lef_parser, DefGridMapping mapping) {
     *this = DefParser{};
     try {
         TextTokens t(def_file_path);
@@ -141,7 +149,9 @@ bool DefParser::parse(const std::string& def_file_path, const LefParser& lef_par
                             throw std::runtime_error("unplaced/duplicate component or missing macro: " + name);
                     } else if (key == "PINS") {
                         Pin pin; pin.name = name;
+                        pin.owner_type = PinOwnerType::TOP_LEVEL;
                         Point placement, offset;
+                        std::vector<PinShape> local_shapes;
                         std::string orient;
                         bool placed = false, layer_seen = false, port_seen = false;
                         while (t.peek() != ";") {
@@ -151,11 +161,17 @@ bool DefParser::parse(const std::string& def_file_path, const LefParser& lef_par
                                 if (port_seen) throw std::runtime_error("multiple IO PORTs unsupported: " + name);
                                 port_seen = true;
                             } else if (property == "LAYER") {
-                                if (layer_seen) throw std::runtime_error("multiple IO shapes unsupported: " + name);
-                                pin.layer = t.take();
+                                const auto layer = t.take();
                                 const auto a = read_point(t), b = read_point(t);
                                 if (b.x <= a.x || b.y <= a.y) throw std::runtime_error("invalid IO rectangle " + name);
-                                offset = Rect(a.x, a.y, b.x, b.y).center(); layer_seen = true;
+                                const auto index = get_layer_index(layer);
+                                if (!index || lef_parser.get_layer_direction(layer) == Direction::UNKNOWN)
+                                    throw std::runtime_error("unknown IO routing layer: " + layer);
+                                local_shapes.push_back({index, Rect(a.x, a.y, b.x, b.y)});
+                                if (!layer_seen) {
+                                    pin.layer = layer;
+                                    offset = local_shapes.back().rect.center(); layer_seen = true;
+                                }
                             } else if (property == "PLACED" || property == "FIXED" || property == "COVER") {
                                 if (placed) throw std::runtime_error("duplicate IO placement " + name);
                                 placement = read_point(t); orient = t.take(); placed = true;
@@ -166,6 +182,12 @@ bool DefParser::parse(const std::string& def_file_path, const LefParser& lef_par
                         if (!placed || !layer_seen) throw std::runtime_error("missing IO placement/layer: " + name);
                         offset = orient_point(offset, orient);
                         pin.coord = {placement.x + offset.x, placement.y + offset.y};
+                        for (const auto& shape : local_shapes) {
+                            const auto a = orient_point({shape.rect.x1, shape.rect.y1}, orient);
+                            const auto b = orient_point({shape.rect.x2, shape.rect.y2}, orient);
+                            pin.port_rects.push_back({shape.layer_idx, Rect(placement.x + a.x, placement.y + a.y,
+                                                                           placement.x + b.x, placement.y + b.y)});
+                        }
                         pin.evaluator_coord = placement; pin.has_evaluator_coord = true;
                         pin.layer_idx = get_layer_index(pin.layer);
                         if (!pin.layer_idx || lef_parser.get_layer_direction(pin.layer) == Direction::UNKNOWN ||
@@ -190,6 +212,14 @@ bool DefParser::parse(const std::string& def_file_path, const LefParser& lef_par
                                 if (mp == macro->pins.end() || !mp->second.has_rect)
                                     throw std::runtime_error("missing macro pin: " + instance + "." + pin_name);
                                 pin.name = instance + "." + pin_name;
+                                pin.instance_name = instance;
+                                pin.owner_type = macro->macro_class == "CORE" ? PinOwnerType::CORE_CELL :
+                                    macro->macro_class == "BLOCK" ? PinOwnerType::BLOCK_MACRO : PinOwnerType::OTHER_MACRO;
+                                pin.owner_bbox = component_bbox(*macro, c, dbu_per_micron_);
+                                pin.has_owner_bbox = true;
+                                for (const auto& shape : mp->second.port_rects)
+                                    pin.port_rects.push_back({get_layer_index(shape.layer),
+                                        transform_macro_rect(shape.rect, *macro, c, dbu_per_micron_)});
                                 const auto checker_offset = mp->second.bbox.center();
                                 pin.evaluator_coord = {c.origin.x + checker_offset.x * dbu_per_micron_,
                                                        c.origin.y + checker_offset.y * dbu_per_micron_};
@@ -198,7 +228,7 @@ bool DefParser::parse(const std::string& def_file_path, const LefParser& lef_par
                                 pin.coord = transform_macro_point(mp->second.bbox.center(), *macro, c,
                                                                   dbu_per_micron_);
                             }
-                            net.pins.push_back(pin);
+                            net.pins.push_back(std::move(pin));
                         }
                         while (t.peek() != ";") {
                             t.expect("+");
@@ -231,8 +261,21 @@ bool DefParser::parse(const std::string& def_file_path, const LefParser& lef_par
         }
         if (!units || !die || !nets_seen || !design_end || nets_.empty())
             throw std::runtime_error("missing UNITS, DIEAREA, NETS or END DESIGN");
-        grid_.x_lines = grid_lines(xs, die_area_.x1, die_area_.x2);
-        grid_.y_lines = grid_lines(ys, die_area_.y1, die_area_.y2);
+        if(xs.empty() || ys.empty()) throw std::runtime_error("both GCELLGRID axes are required");
+        pitch_x_=std::get<2>(xs.front());pitch_y_=std::get<2>(ys.front());
+        auto official_lines=[](const auto& statements,double lower,double upper) {
+            std::vector<double> lines;
+            for(auto [start,count,step]:statements) {
+                if(count<2 || count>1000000 || step<=0) throw std::runtime_error("invalid official GCELLGRID");
+                for(int i=0;i<count;++i) lines.push_back(start+i*step);
+            }
+            std::sort(lines.begin(),lines.end());lines.erase(std::unique(lines.begin(),lines.end()),lines.end());
+            if(lines.front()>lower) lines.insert(lines.begin(),lower);
+            if(lines.back()<upper) lines.push_back(upper);
+            return lines;
+        };
+        grid_.x_lines=mapping==DefGridMapping::OFFICIAL_FULL?official_lines(xs,die_area_.x1,die_area_.x2):grid_lines(xs,die_area_.x1,die_area_.x2);
+        grid_.y_lines=mapping==DefGridMapping::OFFICIAL_FULL?official_lines(ys,die_area_.y1,die_area_.y2):grid_lines(ys,die_area_.y1,die_area_.y2);
         grid_.cols = static_cast<int>(grid_.x_lines.size()) - 1;
         grid_.rows = static_cast<int>(grid_.y_lines.size()) - 1;
         if (!grid_.valid()) throw std::runtime_error("invalid GCell grid");
@@ -250,8 +293,11 @@ bool DefParser::parse(const std::string& def_file_path, const LefParser& lef_par
                     throw std::runtime_error("invalid pin layer or out-of-die coordinate: " + pin.name);
             }
             net.is_cross_die = net.has_bottom_pin() && net.has_top_pin();
-            if ((net.name.starts_with("BOTTOM__") && net.has_top_pin()) ||
-                (net.name.starts_with("TOP__") && net.has_bottom_pin()))
+            // The current official evaluator derives the die from terminal
+            // layers. Prefix restrictions belong only to the legacy checker.
+            if (mapping != DefGridMapping::OFFICIAL_FULL &&
+                ((net.name.starts_with("BOTTOM__") && net.has_top_pin()) ||
+                 (net.name.starts_with("TOP__") && net.has_bottom_pin())))
                 throw std::runtime_error("net prefix conflicts with pin die: " + net.name);
         }
         std::cout << "[INFO] DEF parsed: " << components_.size() << " components, "

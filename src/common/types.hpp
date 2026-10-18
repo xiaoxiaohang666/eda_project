@@ -77,6 +77,21 @@ struct GuideRect {
     Point center() const { return Point((x1 + x2) * 0.5, (y1 + y2) * 0.5); }
 };
 
+enum class PinOwnerType {
+    UNKNOWN,
+    TOP_LEVEL,
+    CORE_CELL,
+    BLOCK_MACRO,
+    OTHER_MACRO
+};
+
+// Existing terminal metal, transformed into global DEF DBU. This is not a
+// new routed wire and is not enlarged to the technology routing WIDTH.
+struct PinShape {
+    int layer_idx{0};
+    Rect rect;
+};
+
 struct Pin {
     std::string name;
     std::string layer;
@@ -86,6 +101,11 @@ struct Pin {
     int gcell_row{-1};
     Point evaluator_coord; // Fixed checker ignores instance orientation/LEF ORIGIN.
     bool has_evaluator_coord{false};
+    std::string instance_name; // Empty for a top-level DEF pin.
+    PinOwnerType owner_type{PinOwnerType::UNKNOWN};
+    Rect owner_bbox; // Oriented LEF SIZE boundary in global DEF DBU.
+    bool has_owner_bbox{false};
+    std::vector<PinShape> port_rects;
 };
 
 struct Net {

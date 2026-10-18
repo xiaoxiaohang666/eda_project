@@ -40,6 +40,7 @@ file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS
 # 构建主可执行文件
 list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp")
 add_library(eda_core STATIC ${SOURCES})
+target_link_libraries(eda_core PRIVATE ${CMAKE_DL_LIBS})
 add_executable(eda_router src/main.cpp)
 target_link_libraries(eda_router PRIVATE eda_core)
 
@@ -47,6 +48,10 @@ target_link_libraries(eda_router PRIVATE eda_core)
 set_target_properties(eda_router PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
+
+add_executable(eda_validate_guide scripts/validate_exported_guide.cpp)
+target_link_libraries(eda_validate_guide PRIVATE eda_core)
+set_target_properties(eda_validate_guide PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
 include(CTest)
 if(BUILD_TESTING)
@@ -83,4 +88,123 @@ if(BUILD_TESTING)
     target_link_libraries(pin_local_tests PRIVATE eda_core)
     add_test(NAME pin_local COMMAND pin_local_tests "${CMAKE_CURRENT_SOURCE_DIR}"
         "${CMAKE_CURRENT_BINARY_DIR}/pin-local-artifacts")
+    add_executable(parser_compat_tests tests/parser_compat_tests.cpp)
+    target_link_libraries(parser_compat_tests PRIVATE eda_core)
+    add_test(NAME parser_compat COMMAND parser_compat_tests
+        "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/parser-compat-artifacts")
+
+    add_executable(tsv_preflight_tests tests/tsv_preflight_tests.cpp)
+    target_link_libraries(tsv_preflight_tests PRIVATE eda_core)
+    add_test(NAME tsv_preflight COMMAND tsv_preflight_tests
+        "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/tsv-preflight-artifacts")
+
+    add_executable(graph_compatibility_tests tests/graph_compatibility_tests.cpp)
+    target_link_libraries(graph_compatibility_tests PRIVATE eda_core)
+    add_test(NAME graph_compatibility COMMAND graph_compatibility_tests
+        "${CMAKE_CURRENT_BINARY_DIR}/graph-compatibility-artifacts")
+    add_executable(large_search_tests tests/large_search_tests.cpp)
+    target_link_libraries(large_search_tests PRIVATE eda_core)
+    add_test(NAME large_search COMMAND large_search_tests
+        "${CMAKE_CURRENT_BINARY_DIR}/large-search-artifacts")
+    add_executable(terminal_parser_tests tests/terminal_parser_tests.cpp)
+    target_link_libraries(terminal_parser_tests PRIVATE eda_core)
+    add_test(NAME terminal_parser COMMAND terminal_parser_tests
+        "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/terminal-parser-artifacts")
+    add_executable(cached_metrics_tests tests/cached_metrics_tests.cpp)
+    target_link_libraries(cached_metrics_tests PRIVATE eda_core)
+    add_test(NAME cached_metrics COMMAND cached_metrics_tests
+        "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/cached-metrics-artifacts")
+    add_executable(pin_obstruction_tests tests/pin_obstruction_tests.cpp)
+    target_link_libraries(pin_obstruction_tests PRIVATE eda_core)
+    add_test(NAME pin_obstruction COMMAND pin_obstruction_tests "${CMAKE_CURRENT_BINARY_DIR}/pin-obstruction-artifacts")
+    add_executable(fast_search_tests tests/fast_search_tests.cpp)
+    target_link_libraries(fast_search_tests PRIVATE eda_core)
+    add_test(NAME fast_search COMMAND fast_search_tests "${CMAKE_CURRENT_BINARY_DIR}/fast-search-artifacts")
+    add_test(NAME export_validator COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_export_validator.py" "$<TARGET_FILE:eda_validate_guide>"
+        "${CMAKE_CURRENT_BINARY_DIR}/export-validator-artifacts")
+    add_executable(terminal_access_tests tests/terminal_access_tests.cpp)
+    target_link_libraries(terminal_access_tests PRIVATE eda_core)
+    add_test(NAME terminal_access COMMAND terminal_access_tests "${CMAKE_CURRENT_BINARY_DIR}/terminal-access-artifacts")
+    add_test(NAME official_cli COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_official_cli.py"
+        "$<TARGET_FILE:eda_router>" "${CMAKE_CURRENT_SOURCE_DIR}/output/runtime/official-flute")
+    add_test(NAME official_runtime_packaging COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_prepare_official_runtime.py")
+    add_test(NAME official_wrapper COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_official_wrapper.py")
+    add_test(NAME submission_entrypoint COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_submission.py")
+    add_executable(global_graph_tests tests/global_graph_tests.cpp)
+    target_link_libraries(global_graph_tests PRIVATE eda_core)
+    add_test(NAME global_graph COMMAND global_graph_tests "${CMAKE_CURRENT_BINARY_DIR}/global-graph-artifacts")
+    add_executable(official_thermal_tests tests/official_thermal_tests.cpp)
+    target_link_libraries(official_thermal_tests PRIVATE eda_core)
+    add_test(NAME official_thermal COMMAND official_thermal_tests "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/official-thermal-artifacts")
+    add_executable(official_ledger_tests tests/official_ledger_tests.cpp)
+    target_link_libraries(official_ledger_tests PRIVATE eda_core)
+    add_test(NAME official_ledger COMMAND official_ledger_tests
+        "${CMAKE_CURRENT_BINARY_DIR}/official-ledger-artifacts" "${CMAKE_CURRENT_SOURCE_DIR}/output/runtime/official-flute")
+    add_executable(official_metrics_tests tests/official_metrics_tests.cpp)
+    target_link_libraries(official_metrics_tests PRIVATE eda_core)
+    add_test(NAME official_metrics COMMAND official_metrics_tests "${CMAKE_CURRENT_BINARY_DIR}/official-metrics-artifacts")
+
+    add_executable(fast_quality_tests tests/fast_quality_tests.cpp)
+    target_link_libraries(fast_quality_tests PRIVATE eda_core)
+    add_test(NAME fast_quality COMMAND fast_quality_tests
+        "${CMAKE_CURRENT_BINARY_DIR}/fast-quality-artifacts"
+        "${CMAKE_CURRENT_SOURCE_DIR}/output/runtime/official-flute")
+
+    add_executable(tsv_polish_tests tests/tsv_polish_tests.cpp)
+    target_link_libraries(tsv_polish_tests PRIVATE eda_core)
+    add_test(NAME tsv_polish COMMAND tsv_polish_tests "${CMAKE_CURRENT_BINARY_DIR}/tsv-polish-artifacts")
+
+    add_test(NAME official_benchmark COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_benchmark_official.py")
+
+    add_executable(eda_analyze_congestion scripts/analyze_official_congestion.cpp)
+    target_link_libraries(eda_analyze_congestion PRIVATE eda_core)
+    set_target_properties(eda_analyze_congestion PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+    add_executable(rrr_score_tests tests/rrr_score_tests.cpp)
+    target_link_libraries(rrr_score_tests PRIVATE eda_core)
+    add_test(NAME rrr_score COMMAND rrr_score_tests
+        "${CMAKE_CURRENT_BINARY_DIR}/rrr-score-artifacts"
+        "${CMAKE_CURRENT_SOURCE_DIR}/output/runtime/official-flute")
+
+    add_executable(tsv_thermal_candidate_tests tests/tsv_thermal_candidate_tests.cpp)
+    target_link_libraries(tsv_thermal_candidate_tests PRIVATE eda_core)
+    add_test(NAME tsv_thermal_candidates COMMAND tsv_thermal_candidate_tests
+        "${CMAKE_CURRENT_BINARY_DIR}/tsv-thermal-candidate-artifacts")
+
+    add_executable(score_pricing_tests tests/score_pricing_tests.cpp)
+    target_link_libraries(score_pricing_tests PRIVATE eda_core)
+    add_test(NAME score_pricing COMMAND score_pricing_tests
+        "${CMAKE_CURRENT_BINARY_DIR}/score-pricing-artifacts"
+        "${CMAKE_CURRENT_SOURCE_DIR}/output/runtime/official-flute")
+
+    add_executable(net_validator_tests tests/net_validator_tests.cpp)
+    target_link_libraries(net_validator_tests PRIVATE eda_core)
+    add_test(NAME net_validator COMMAND net_validator_tests "${CMAKE_CURRENT_BINARY_DIR}/net-validator-artifacts")
+
+    add_executable(budgeted_recovery_tests tests/budgeted_recovery_tests.cpp)
+    target_link_libraries(budgeted_recovery_tests PRIVATE eda_core)
+    add_test(NAME budgeted_recovery COMMAND budgeted_recovery_tests
+        "${CMAKE_CURRENT_BINARY_DIR}/budgeted-recovery-artifacts"
+        "${CMAKE_CURRENT_SOURCE_DIR}/output/runtime/official-flute")
+
+    add_executable(fast_layer_pruning_tests tests/fast_layer_pruning_tests.cpp)
+    target_link_libraries(fast_layer_pruning_tests PRIVATE eda_core)
+    add_test(NAME fast_layer_pruning COMMAND fast_layer_pruning_tests
+        "${CMAKE_CURRENT_BINARY_DIR}/fast-layer-pruning-artifacts"
+        "${CMAKE_CURRENT_SOURCE_DIR}/output/runtime/official-flute")
+
+    add_test(NAME v5_cli COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_v5_cli.py" "$<TARGET_FILE:eda_router>")
+    add_executable(tsv_assignment_v5_tests tests/tsv_assignment_v5_tests.cpp)
+    target_link_libraries(tsv_assignment_v5_tests PRIVATE eda_core)
+    add_test(NAME tsv_assignment_v5 COMMAND tsv_assignment_v5_tests
+        "${CMAKE_CURRENT_BINARY_DIR}/tsv-assignment-v5-artifacts")
+    add_executable(v5_topology_tests tests/v5_topology_tests.cpp)
+    target_link_libraries(v5_topology_tests PRIVATE eda_core)
+    add_test(NAME v5_topology COMMAND v5_topology_tests
+        "${CMAKE_CURRENT_BINARY_DIR}/v5-topology-artifacts"
+        "${CMAKE_CURRENT_SOURCE_DIR}/output/runtime/official-flute")
 endif()

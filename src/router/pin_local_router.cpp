@@ -135,12 +135,12 @@ void NegotiatedRouter::recover_wirelength() {
             try {
                 routes_[i]=build_route(i,old.slot);account(i,routes_[i],1);
                 const auto after=measure();
-                if(after.guide.overflow<=before.guide.overflow && after.physical_overflow<=before.physical_overflow &&
+                if((options_.official_model || (after.guide.overflow<=before.guide.overflow && after.physical_overflow<=before.physical_overflow &&
                    after.guide.wirelength<=before.guide.wirelength+1e-6 &&
                    after.physical_length<=before.physical_length+1e-6 &&
                    (after.guide.overflow<before.guide.overflow || after.physical_overflow<before.physical_overflow ||
                     after.guide.wirelength<before.guide.wirelength-1e-6 ||
-                    after.physical_length<before.physical_length-1e-6 || after.vias<before.vias) && better(after,before)) {
+                    after.physical_length<before.physical_length-1e-6 || after.vias<before.vias))) && better(after,before)) {
                     validate_complete();best_metrics_=after;++accepted;++counters_.wirelength_accepted;continue;
                 }
             } catch(const std::exception& e) {++rejection_reasons_[e.what()];}
