@@ -12,8 +12,7 @@ CompleteMetrics NegotiatedRouter::recovery_metrics(const CompleteMetrics& invari
     m.guide.overflow=int(official_overflow_);
     m.official.squared_normalized_overflow=double(std::max(0.0L,official_squared_overflow_));
     m.official.zero_capacity_cells=official_zero_capacity_cells_;
-    const double ratio=std::max(m.guide.normalized,1e-9);
-    m.official.wirelength_score=100*std::min(ratio,1/ratio);
+    m.official.wirelength_score=official_wirelength_score(m.guide.wirelength,m.guide.reference,options_.official_metrics);
     m.official.congestion_score=100/std::sqrt(1+m.official.squared_normalized_overflow);
     m.guide.quality=(.45*m.official.wirelength_score+.30*m.official.congestion_score+.25*m.official.thermal_score)/100;
     m.official.guide=m.guide;
@@ -58,7 +57,7 @@ bool NegotiatedRouter::recovery_transaction(size_t index,
         std::string error;
         if(trial.slot!=old.slot || !policy_.validate_mapping(def_.nets()[index],trial.guides,trial.slot,error))
             throw std::runtime_error("budgeted recovery changed TSV mapping: "+error);
-        if(!validate_net_guides(def_.nets()[index],def_.die_area(),lef_,trial.guides,error))
+        if(!validate_route(index,trial.guides,error))
             throw std::runtime_error("budgeted recovery invalid net: "+error);
         // The serialized rectangles, not the search proxy or caller's cached
         // metrics, are the acceptance authority.

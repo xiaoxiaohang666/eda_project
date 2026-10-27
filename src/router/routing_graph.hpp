@@ -4,13 +4,16 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 
 namespace eda {
+namespace compat { class Resources; }
 
 enum class RoutingGeometryMode { PHYSICAL_STRICT, GLOBAL_GUIDE };
 struct RoutingGraphOptions {
     RoutingGeometryMode geometry{RoutingGeometryMode::PHYSICAL_STRICT};
     bool allow_nonpreferred{true}; // Applies only to abstract GLOBAL_GUIDE adjacency.
+    bool score_20261020{false}; // Opt-in documented October 20 resource/direction rules.
 };
 
 // Resource graph in global DEF DBU. PHYSICAL_STRICT retains preferred-direction
@@ -47,13 +50,18 @@ public:
     RoutingGeometryMode geometry_mode() const { return options_.geometry; }
     bool global_guide_mode() const { return options_.geometry == RoutingGeometryMode::GLOBAL_GUIDE; }
     bool allows_nonpreferred() const { return global_guide_mode() && options_.allow_nonpreferred; }
+    bool score_20261020() const { return options_.score_20261020; }
     // New official scorer capacity and fixed OBS/all-master-PIN demand. These
     // are built only in GLOBAL_GUIDE mode, independently of legacy proxies.
     double official_capacity(int id) const;
     uint32_t official_obstacle_demand(int id) const;
     const std::vector<uint32_t>& official_obstacle_demands() const;
+    // Sparse, sorted cell-layer IDs exempt from this net's GUIDE/TSV demand.
+    // The historical profile returns an empty mask, retaining its old demand.
+    std::vector<int> own_pin_nodes(const Net& net) const;
     const char* capacity_model() const { return global_guide_mode()
-        ? "official-pattern-track-capacity-and-obs-pin-index-union"
+        ? (score_20261020() ? "20261020-compat-clipped-tracks-and-obs-pin-io-union"
+                            : "official-pattern-track-capacity-and-obs-pin-index-union")
         : "legacy-guide-axis-and-strict-track-corridors"; }
     double ell0() const { return ell0_; }
     const GCellGrid& grid() const { return grid_; }
@@ -96,6 +104,7 @@ private:
     std::array<std::vector<double>, 21> guide_capacity_;
     std::array<std::vector<double>, 21> official_capacity_;
     std::vector<uint32_t> official_obstacle_demand_;
+    std::shared_ptr<const compat::Resources> updated_resources_;
 
     void build_official_resources(const DefParser&, const LefParser&);
 

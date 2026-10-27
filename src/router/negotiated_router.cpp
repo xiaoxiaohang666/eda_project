@@ -1,4 +1,6 @@
 #include "router/negotiated_router.hpp"
+#include "scoring/compat_validation.hpp"
+#include "validation/gcell_encoding.hpp"
 #include <queue>
 #include <fstream>
 #include <iomanip>
@@ -14,6 +16,29 @@
 namespace eda {
 namespace {
 constexpr double inf = std::numeric_limits<double>::infinity();
+// Only the optional topology trial uses this temporary deadline. Every exit,
+// including a failed search or encode, restores the initial-routing deadline
+// and charges the actual extra work against the shared trial budget.
+class ScopedTopologyBudget {
+    using Clock=std::chrono::steady_clock;
+    Clock::time_point& deadline_;
+    bool& active_;
+    double& seconds_;
+    Clock::time_point saved_,started_;
+    bool saved_active_;
+public:
+    ScopedTopologyBudget(Clock::time_point& deadline,bool& active,double& seconds,double remaining)
+        :deadline_(deadline),active_(active),seconds_(seconds),saved_(deadline),started_(Clock::now()),saved_active_(active) {
+        deadline_=std::min(deadline_,started_+std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(remaining)));
+        active_=true;
+    }
+    ~ScopedTopologyBudget() {
+        seconds_+=std::chrono::duration<double>(Clock::now()-started_).count();
+        deadline_=saved_;active_=saved_active_;
+    }
+    ScopedTopologyBudget(const ScopedTopologyBudget&)=delete;
+    ScopedTopologyBudget& operator=(const ScopedTopologyBudget&)=delete;
+};
 struct OfficialCellContribution {
     uint64_t overflow{};
     long double squared{};
@@ -69,7 +94,10 @@ NegotiatedRouter::NegotiatedRouter(const DefParser& d,const LefParser& l,const T
         for(const auto& net:def_.nets()) {
             reference_lengths_.push_back(flute_->measure_net(net,step,options_.official_metrics));
             full_reference_+=reference_lengths_.back();
+            if(options_.official_metrics.score_20261020) own_pin_nodes_.push_back(graph_.own_pin_nodes(net));
         }
+        if(options_.official_metrics.score_20261020 && full_reference_<=0)
+            throw std::runtime_error("20261020 score requires a positive total FLUTE reference");
     }
     started_=std::chrono::steady_clock::now();
     // Keep part of even a short explicit budget available for final encoding/export.
@@ -83,6 +111,9 @@ const std::vector<int>& NegotiatedRouter::cell_owners(int node) const {
     return found==cell_nets_.end()?empty:found->second;
 }
 bool NegotiatedRouter::timed_out() const { return std::chrono::steady_clock::now()>=deadline_; }
+void NegotiatedRouter::check_v5_topology_budget() const {
+    if(v5_topology_trial_ && timed_out()) throw std::runtime_error("SEARCH_LIMIT: V5 topology work budget exhausted");
+}
 double NegotiatedRouter::official_congestion_price() const {
     if(!options_.official_model || !options_.official_score_pricing) return 1.0;
     if(pricing_generation_==state_generation_) return congestion_price_;
@@ -100,6 +131,16 @@ double NegotiatedRouter::official_congestion_price() const {
     congestion_price_max_=std::max(congestion_price_max_,congestion_price_);
     pricing_generation_=state_generation_;++pricing_updates_;
     return congestion_price_;
+}
+bool NegotiatedRouter::pin_exempt(size_t net,int node) const {
+    return net<own_pin_nodes_.size() && std::binary_search(own_pin_nodes_[net].begin(),own_pin_nodes_[net].end(),node);
+}
+bool NegotiatedRouter::validate_route(size_t index,const std::vector<GuideRect>& guides,std::string& error) const {
+    if(options_.official_model && options_.tsv_policy.resource_mode==TsvResourceMode::GLOBAL_GRID &&
+       !validate_gcell_encoding(def_.nets().at(index),def_.die_area(),graph_.grid(),lef_,guides,error)) return false;
+    if(options_.official_metrics.score_20261020)
+        return validate_net_guides(def_.nets().at(index),def_.die_area(),lef_,guides,error,def_.gcell_pitch_x(),def_.gcell_pitch_y());
+    return validate_net_guides(def_.nets().at(index),def_.die_area(),lef_,guides,error);
 }
 double NegotiatedRouter::edge_cost(int a,int b,const NetRoute& own) const {
     const auto key=route_edge(a,b);
@@ -120,7 +161,7 @@ double NegotiatedRouter::edge_cost(int a,int b,const NetRoute& own) const {
         result+=present_*marginal(u,cap);
         auto h=edge_history_.find(key); if(h!=edge_history_.end()) result+=history_scale_*h->second;
     }
-    if(!own.nodes.count(b)) {
+    if(!own.nodes.count(b) && !pin_exempt(own.net_index,b)) {
         if(options_.official_model) {
             const double raw=graph_.official_capacity(b),u=graph_.official_obstacle_demand(b)+demand_[b];
             if(raw<=0) result+=1e6;
@@ -130,7 +171,7 @@ double NegotiatedRouter::edge_cost(int a,int b,const NetRoute& own) const {
     }
     return result;
 }
-double NegotiatedRouter::access_cost(const PinAccess& a) const {
+double NegotiatedRouter::access_cost(const PinAccess& a,const NetRoute* own) const {
     double result=a.length/graph_.ell0()+(options_.official_model?options_.official_metrics.via_cost_ratio:0.2)*a.vias;
     if(recovery_cell_cost_) result=options_.official_metrics.via_cost_ratio*a.vias*
         std::max(options_.official_metrics.gcell_width_dbu,options_.official_metrics.gcell_height_dbu)/graph_.ell0();
@@ -144,6 +185,7 @@ double NegotiatedRouter::access_cost(const PinAccess& a) const {
             if(n>=0 && touched.insert(n).second) {
                 if(recovery_cell_cost_) result+=(lef_.get_layer_direction(g.layer)==Direction::HORIZONTAL?
                     options_.official_metrics.gcell_width_dbu:options_.official_metrics.gcell_height_dbu)/graph_.ell0();
+                if(options_.official_metrics.score_20261020 && own && (own->nodes.count(n)||pin_exempt(own->net_index,n))) continue;
                 if(options_.official_model) {
                     const double raw=graph_.official_capacity(n),u=graph_.official_obstacle_demand(n)+demand_[n];
                     if(raw<=0) result+=1e6;
@@ -167,7 +209,15 @@ std::vector<PinAccess> NegotiatedRouter::accesses(Point p,int original,int low,i
         PinAccess access;access.node=node;
         for(int l=std::min(original,layer);l<std::max(original,layer);++l) {
             if(l==10) throw std::runtime_error("ordinary access cannot cross DIE");
-            for(const auto& shape:graph_.via_rects(p,l)) access.guides.push_back(guide(shape.rect,get_layer_index(shape.layer),def_.die_area()));
+            if(options_.tsv_policy.resource_mode==TsvResourceMode::GLOBAL_GRID) {
+                // The M10 landing reaches the M9 search layer through occupied
+                // GCells too; physical via caps would reintroduce thin Guides.
+                const auto cell=grid.get_cell_rect(c,r);
+                for(int metal:{l,l+1}) access.guides.push_back(guide(cell,metal,def_.die_area()));
+            } else {
+                for(const auto& shape:graph_.via_rects(p,l))
+                    access.guides.push_back(guide(shape.rect,get_layer_index(shape.layer),def_.die_area()));
+            }
             ++access.vias;
         }
         return {std::move(access)};
@@ -425,9 +475,10 @@ std::vector<PinAccess> NegotiatedRouter::accesses(const Pin& pin,int low,int hig
 }
 PathResult NegotiatedRouter::search(const std::vector<PinAccess>& sources,const std::set<int>& targets,
                                    const NetRoute& own,int low,int high,bool dijkstra) {
+    check_v5_topology_budget();
     if(sources.empty()||targets.empty()) return {};
     const auto& grid=graph_.grid();
-    std::vector<double> source_costs;for(const auto& source:sources) source_costs.push_back(access_cost(source));
+    std::vector<double> source_costs;for(const auto& source:sources) source_costs.push_back(access_cost(source,&own));
     int minc=grid.cols,maxc=0,minr=grid.rows,maxr=0,minl=21,maxl=0;
     for(int n:targets) {minc=std::min(minc,graph_.col(n));maxc=std::max(maxc,graph_.col(n));
         minr=std::min(minr,graph_.row(n));maxr=std::max(maxr,graph_.row(n));
@@ -481,6 +532,7 @@ PathResult NegotiatedRouter::search(const std::vector<PinAccess>& sources,const 
     // A connection ends at its first tree node. Keeping a later tail can add
     // cycles, cells and vias even though the net is already connected.
     auto consider=[&](std::vector<int> path,size_t si,bool z=false,bool rank_layer=false,double rank_bound=inf) {
+        check_v5_topology_budget();
         if(improve_fast) {
             const auto hit=std::find_if(path.begin(),path.end(),[&](int n){return targets.count(n);});
             if(hit!=path.end() && hit+1!=path.end()) {
@@ -489,6 +541,7 @@ PathResult NegotiatedRouter::search(const std::vector<PinAccess>& sources,const 
         }
         double cost=source_costs[si],base=cost;
         for(size_t k=1;k<path.size();++k) {
+            if((k&255U)==0) check_v5_topology_budget();
             cost+=edge_cost(path[k-1],path[k],own);
             if(improve_fast && !own.edges.count(route_edge(path[k-1],path[k]))) {
                 if(recovery_cell_cost_) {
@@ -533,10 +586,12 @@ PathResult NegotiatedRouter::search(const std::vector<PinAccess>& sources,const 
         std::partial_sort(ranked.begin(),ranked.begin()+nearest,ranked.end());
         std::vector<int> near;for(size_t i=0;i<nearest;++i) near.push_back(ranked[i].second);
         for(size_t si=0;si<std::min<size_t>(sources.size(),fast_search?2:4);++si) for(int target:near) {
+            check_v5_topology_budget();
             const int source=sources[si].node;
             std::vector<std::tuple<double,int,bool>> single_layers;
             std::vector<double> layer_minima(size_t(high-low+1),inf);
             if(graph_.allows_nonpreferred()) for(int l=low;l<=high;++l) for(bool x_first:{true,false}) {
+                check_v5_topology_budget();
                 std::vector<int> path{source};bool legal=true;
                 auto append=[&](int n) {if(n<0 || !graph_.legal_edge(path.back(),n)) {legal=false;return;}path.push_back(n);};
                 auto stack=[&](int layer) {while(legal && graph_.layer(path.back())!=layer) {
@@ -632,6 +687,7 @@ PathResult NegotiatedRouter::search(const std::vector<PinAccess>& sources,const 
                 }
             } else if(pairs.size()>4) pairs.resize(4);
             for(auto [rank,h,v]:pairs) {
+              check_v5_topology_budget();
               bool pair_has_legal_l=false;
               for(int kind=0;kind<4;++kind) {
                 // Two legal L shapes are enough to compare this layer pair.
@@ -726,12 +782,15 @@ PathResult NegotiatedRouter::search(const std::vector<PinAccess>& sources,const 
     }
 }
 void NegotiatedRouter::encode(size_t index,NetRoute& route) {
+    check_v5_topology_budget();
+    route.net_index=index;
     std::vector<GuideRect> untrimmed_upper;
     route.guides.clear();route.length=0;route.vias=0;
     const auto& grid=graph_.grid();
     // Maximal preferred-direction runs partition the set of occupied GCells.
     std::set<int> pending=route.explicit_geometry?std::set<int>{}:route.nodes;
     while(!pending.empty()) {
+        check_v5_topology_budget();
         const int n=*pending.begin();pending.erase(pending.begin());
         const int l=graph_.layer(n),c=graph_.col(n),r=graph_.row(n);
         const bool horizontal=lef_.get_layer_direction(get_layer_name(l))==Direction::HORIZONTAL;
@@ -820,7 +879,7 @@ void NegotiatedRouter::encode(size_t index,NetRoute& route) {
     route.guides.erase(std::unique(route.guides.begin(),route.guides.end(),[&](auto& a,auto& b){return key(a)==key(b);}),route.guides.end());
     // Large designs merge collinear strips in O(R log R); small designs retain
     // the legacy exact-rectangle merge order for deterministic evaluator control.
-    if(large_design()) for(bool horizontal:{true,false}) {
+    if(large_design() || options_.official_metrics.score_20261020) for(bool horizontal:{true,false}) {
         auto strip_key=[&](const GuideRect& r) {
             return horizontal?std::tuple(r.layer,r.y1,r.y2,r.x1,r.x2):std::tuple(r.layer,r.x1,r.x2,r.y1,r.y2);
         };
@@ -828,7 +887,8 @@ void NegotiatedRouter::encode(size_t index,NetRoute& route) {
         std::vector<GuideRect> merged;
         for(const auto& r:route.guides) {
             bool combine=false;
-            if(!merged.empty()) {
+            const bool preferred=horizontal==(lef_.get_layer_direction(r.layer)==Direction::HORIZONTAL);
+            if(!merged.empty() && (!options_.official_metrics.score_20261020 || preferred)) {
                 auto& a=merged.back();
                 if(horizontal && a.layer==r.layer && a.y1==r.y1 && a.y2==r.y2 && r.x1<=a.x2) {
                     a.x2=std::max(a.x2,r.x2);combine=true;
@@ -847,6 +907,7 @@ void NegotiatedRouter::encode(size_t index,NetRoute& route) {
         // rectangles as separate demand/MST vertices.
         std::vector<bool> contained(route.guides.size());
         for(size_t i=0;i<route.guides.size();++i) for(size_t j=0;j<route.guides.size();++j) {
+            if((j&255U)==0) check_v5_topology_budget();
             if(i==j || contained[j]) continue;
             const auto& a=route.guides[i];const auto& b=route.guides[j];
             if(a.layer!=b.layer || a.x1<b.x1 || a.y1<b.y1 || a.x2>b.x2 || a.y2>b.y2) continue;
@@ -856,7 +917,7 @@ void NegotiatedRouter::encode(size_t index,NetRoute& route) {
         for(size_t i=0;i<route.guides.size();++i) if(!contained[i]) reduced.push_back(std::move(route.guides[i]));
         route.guides=std::move(reduced);
     }
-    bool changed=!large_design();
+    bool changed=!large_design() && !options_.official_metrics.score_20261020;
     while(changed) {
         changed=false;
         for(size_t i=0;i<route.guides.size()&&!changed;++i) for(size_t j=i+1;j<route.guides.size();++j) {
@@ -880,6 +941,7 @@ void NegotiatedRouter::encode(size_t index,NetRoute& route) {
         if(!terminal) throw std::runtime_error("GUIDE_OBS_VIOLATION: "+g.layer+" "+std::to_string(g.x1)+","+std::to_string(g.y1)+","+std::to_string(g.x2)+","+std::to_string(g.y2)+" for "+def_.nets()[index].name);
     }
     std::string error;
+    check_v5_topology_budget();
     if(!policy_.validate_mapping(def_.nets()[index],route.guides,route.slot,error)) {
         bool repaired=false;
         if(options_.official_model && !large_design() && route.slot>=0) {
@@ -920,11 +982,16 @@ void NegotiatedRouter::encode(size_t index,NetRoute& route) {
         for(const auto& g:route.guides) if(g.layer==p.layer && Rect(g.x1,g.y1,g.x2,g.y2).contains(p.coord)) found=true;
         if(!found) throw std::runtime_error("HARD_RULE_VIOLATION: pin lost: "+p.name);
     }
+    if((options_.official_metrics.score_20261020 ||
+        (options_.official_model && options_.tsv_policy.resource_mode==TsvResourceMode::GLOBAL_GRID)) &&
+       !validate_route(index,route.guides,error))
+        throw std::runtime_error("HARD_RULE_VIOLATION: "+error);
     route.measured=options_.official_model?measure_official_net_guides(def_.nets()[index],route.guides,graph_,lef_,options_.official_metrics,reference_lengths_.at(index)):
         measure_net_guides(route.guides,graph_,lef_);
+    check_v5_topology_budget();
 }
 NetRoute NegotiatedRouter::build_tree(size_t index,int slot,int variant,const std::array<int,2>& seeds,int only_side,bool tsv_last) {
-    const auto& net=def_.nets()[index];NetRoute result;result.slot=slot;
+    const auto& net=def_.nets()[index];NetRoute result;result.slot=slot;result.net_index=index;
     for(int side=0;side<2;++side) {
         if(only_side>=0 && side!=only_side) continue;
         std::vector<Pin> terminals;
@@ -979,7 +1046,7 @@ NetRoute NegotiatedRouter::build_tree(size_t index,int slot,int variant,const st
             const auto& pin=terminals[selected];auto choices=accesses(pin,low,high);
             if(tree.empty()) {
                 size_t chosen=0;for(size_t j=1;j<choices.size();++j)
-                    if(access_cost(choices[j])<access_cost(choices[chosen])) chosen=j;
+                    if(access_cost(choices[j],&result)<access_cost(choices[chosen],&result)) chosen=j;
                 result.accesses.push_back(choices[chosen]);tree.insert(choices[chosen].node);result.nodes.insert(choices[chosen].node);
             } else {
                 const auto path=search(choices,tree,result,low,high,options_.dijkstra);
@@ -1006,7 +1073,7 @@ NetRoute NegotiatedRouter::build_candidate(size_t index,int slot,int variant) {
 // Partial initial routes have no TSV yet. Candidate W/C ranking does not
 // require thermal scoring, which is undefined before the first crossing net.
 CompleteMetrics NegotiatedRouter::official_candidate_base() const {
-    CompleteMetrics base;base.official_model=true;
+    CompleteMetrics base;base.official_model=true;base.score_20261020=options_.official_metrics.score_20261020;
     if(official_overflow_>uint64_t(std::numeric_limits<int>::max()))
         throw std::logic_error("official aggregate overflow exceeds metric range");
     base.guide.wirelength=double(official_wirelength_);
@@ -1132,11 +1199,22 @@ std::tuple<size_t,double,long long,double,int> NegotiatedRouter::official_candid
         if(cap>0) squared+=0.01*(new_over*new_over-old_over*old_over)/(cap*cap);
         else if(u<=0 && u+m>0) {++zeros;squared+=10000.0;}
     }
-    const double ref=base.guide.reference+r.measured.reference;
-    const double norm=ref>0?(base.guide.wirelength+r.measured.wirelength)/ref:0.0;
-    const double w=norm>0?std::min(norm,1.0/norm):0.0;
+    double ref=base.guide.reference+r.measured.reference;
+    double length=base.guide.wirelength+r.measured.wirelength;
+    // Reserve the reference cost of all unaccounted nets, including a second
+    // temporarily removed net in a TSV swap, until the transaction is complete.
+    if(options_.official_metrics.score_20261020) {
+        length+=std::max(0.0,double(full_reference_)-ref);ref=double(full_reference_);
+    }
+    const double w=official_wirelength_score(length,ref,options_.official_metrics)/100;
     const double quality=0.45*w+0.30/std::sqrt(1.0+std::max(0.0,squared));
-    return {zeros,-quality,overflow,r.length,r.vias};
+    return {options_.official_metrics.score_20261020?0:zeros,-quality,overflow,r.length,r.vias};
+}
+bool NegotiatedRouter::v5_topology_better(const NetRoute& trial,const NetRoute& baseline,const CompleteMetrics& base) const {
+    const auto trial_key=official_candidate_key(trial,base),baseline_key=official_candidate_key(baseline,base);
+    // The legacy key puts zero-capacity cells before quality. Preserve that
+    // safeguard, but do not buy fewer bad cells with a lower real W/C score.
+    return trial_key<baseline_key && std::get<1>(trial_key)<=std::get<1>(baseline_key);
 }
 NetRoute NegotiatedRouter::build_route(size_t index,int slot) {
     std::optional<NetRoute> best;std::string failure;
@@ -1166,6 +1244,10 @@ NetRoute NegotiatedRouter::build_route(size_t index,int slot) {
     const bool has_shared_side=net.pins.size()>2;
     if(best && options_.v5_pin_rooted && options_.official_model && initial_build_ && large_design() &&
        slot>=0 && net.is_cross_die && has_shared_side && net.pins.size()<=options_.v5_topology_max_pins && !timed_out()) {
+      const double remaining=v5_topology_seconds_limit()-counters_.v5_topology_seconds;
+      if(remaining<=0) ++counters_.v5_topology_budget_skips;
+      else {
+        ScopedTopologyBudget budget(deadline_,v5_topology_trial_,counters_.v5_topology_seconds,remaining);
         ++counters_.v5_topology_attempted;
         try {
             // Construction and comparison are read-only with respect to all
@@ -1177,15 +1259,23 @@ NetRoute NegotiatedRouter::build_route(size_t index,int slot) {
             if(same_tsv) for(size_t k=0;k<trial.measured.tsv_points.size();++k)
                 if(trial.measured.tsv_points[k].distance_to(best->measured.tsv_points[k])!=0) {same_tsv=false;break;}
             if(!same_tsv) ++counters_.v5_topology_thermal_rejections;
-            else if(candidate_better(trial,*best)) {
+            else {
+              if(!official_base) official_base=official_candidate_base();
+              if(v5_topology_better(trial,*best,*official_base)) {
                 // encode() verifies mapping, pin coverage and obstruction;
                 // check full connectivity before admitting the alternative.
                 std::string error;
-                if(!validate_net_guides(net,def_.die_area(),lef_,trial.guides,error))
+                if(!validate_route(index,trial.guides,error))
                     throw std::runtime_error("v5 pin-rooted invalid Guide: "+error);
+                check_v5_topology_budget();
                 best=std::move(trial);++counters_.v5_topology_accepted;
+              }
             }
-        } catch(const std::exception&) {++counters_.v5_topology_failures;}
+        } catch(const std::exception&) {
+            if(timed_out()) ++counters_.v5_topology_interruptions;
+            else ++counters_.v5_topology_failures;
+        }
+      }
     }
     if(best && options_.pin_local && slot<0 && !timed_out() && !(initial_build_&&large_design())) {
         for(auto& trial:pin_local_candidates(index)) {
@@ -1279,6 +1369,7 @@ CompleteMetrics NegotiatedRouter::measure() const {
         result.vias+=routes_[i].vias;result.physical_tsvs+=routes_[i].slot>=0;
     }
     result.official_model=options_.official_model;
+    result.score_20261020=options_.official_metrics.score_20261020;
     if(options_.official_model) {
         result.official=aggregate_official_metrics(cached,demand_,graph_,thermal_,options_.official_metrics,false);
         result.guide=result.official.guide;
@@ -1292,7 +1383,7 @@ CompleteMetrics NegotiatedRouter::measure() const {
 }
 bool NegotiatedRouter::better(const CompleteMetrics& a,const CompleteMetrics& b) {
     if(a.official_model) {
-        if(a.official.zero_capacity_cells!=b.official.zero_capacity_cells) return a.official.zero_capacity_cells<b.official.zero_capacity_cells;
+        if(!a.score_20261020 && a.official.zero_capacity_cells!=b.official.zero_capacity_cells) return a.official.zero_capacity_cells<b.official.zero_capacity_cells;
         if(std::abs(a.guide.quality-b.guide.quality)>1e-10) return a.guide.quality>b.guide.quality;
         if(a.guide.overflow!=b.guide.overflow) return a.guide.overflow<b.guide.overflow;
         return a.physical_length<b.physical_length;
@@ -1544,6 +1635,9 @@ void NegotiatedRouter::validate_complete() const {
     std::vector<int> expected_demand(large_design()?graph_.size():0);
     for(size_t i=0;i<routes_.size();++i) {
         const auto& r=routes_[i];std::string error;
+        if(options_.official_model && options_.tsv_policy.resource_mode==TsvResourceMode::GLOBAL_GRID &&
+           !validate_gcell_encoding(def_.nets()[i],def_.die_area(),graph_.grid(),lef_,r.guides,error))
+            throw std::runtime_error("GCELL_ENCODING_VIOLATION: "+error);
         for(auto edge:r.edges) {
             auto found=edge_nets_.find(edge);
             if(found==edge_nets_.end()||!std::binary_search(found->second.begin(),found->second.end(),int(i))) throw std::logic_error("missing reverse edge owner");
@@ -1598,7 +1692,12 @@ void NegotiatedRouter::validate_complete() const {
         }
     }
     if(large_design() && expected_demand!=demand_) throw std::logic_error("Guide ledger rollback mismatch");
-    std::string error;if(!validate_guides(def_,lef_,all,error)) throw std::runtime_error("HARD_RULE_VIOLATION: "+error);
+    if(options_.official_metrics.score_20261020) {
+        const auto checked=compat::validate(def_,lef_,all);
+        if(checked.error_count) throw std::runtime_error("HARD_RULE_VIOLATION: "+checked.errors.front());
+    } else {
+        std::string error;if(!validate_guides(def_,lef_,all,error)) throw std::runtime_error("HARD_RULE_VIOLATION: "+error);
+    }
     validated_generation_=state_generation_;
     complete_validation_cached_=true;
 }
@@ -1630,7 +1729,10 @@ bool NegotiatedRouter::route_all() {
         std::cout<<"[INITIAL] nets="<<routes_.size()<<" slots="<<policy_.slots().size()<<" guide_overflow="<<best_metrics_.guide.overflow
                  <<" physical_overflow="<<best_metrics_.physical_overflow<<"\n";
         run_rrr(large_design()?std::min(3,options_.rrr_rounds):options_.rrr_rounds);
-        if(!large_design()) optimize_tsv();
+        // Global-grid supply can contain millions of cells even with few nets.
+        // Its bounded spatial assignment/polish replaces this exhaustive
+        // legacy net x reservation proposal enumeration.
+        if(!large_design() && options_.tsv_policy.resource_mode!=TsvResourceMode::GLOBAL_GRID) optimize_tsv();
         pre_recovery_metrics_=measure();
         if(!large_design()) recover_wirelength();
         if(options_.large_recovery) recover_budgeted_wirelength();
@@ -1666,6 +1768,14 @@ bool NegotiatedRouter::export_guide(const std::string& path) const {
             }
             if(token!=")") return false;
         }
+        if(options_.official_model && options_.tsv_policy.resource_mode==TsvResourceMode::GLOBAL_GRID) {
+            for(const auto& net:def_.nets()) {
+                const auto found=loaded.find(net.name);std::string error;
+                if(found==loaded.end() || !validate_gcell_encoding(net,def_.die_area(),graph_.grid(),lef_,found->second,error))
+                    throw std::runtime_error("GCELL_ENCODING_VIOLATION: "+error);
+            }
+        }
+        if(options_.official_metrics.score_20261020) return compat::validate(def_,lef_,loaded).error_count==0;
         std::string error;return validate_guides(def_,lef_,loaded,error);
     } catch(const std::exception& e) {std::cerr<<"[ERROR] export: "<<e.what()<<"\n";return false;}
 }
@@ -1685,7 +1795,9 @@ bool NegotiatedRouter::export_stats(const std::string& path) const {
                 <<",\"thermal_score\":"<<m.official.thermal_score<<",\"zero_capacity_cells\":"<<m.official.zero_capacity_cells;
             out<<"}";
         };
-        out<<"{\n\"scoring_model\":"<<json_string(options_.official_model?"official-2026":"legacy-proxy")<<",\n\"geometry_model\":"<<json_string(graph_.capacity_model())<<",\n\"guide_encoding\":"<<json_string(options_.official_model?"global-gcell-regions":large_design()?"width-corridors-and-via-enclosures":"legacy-gcell-envelopes")
+        out<<"{\n\"scoring_model\":"<<json_string(options_.official_metrics.score_20261020?"compat-20261020":options_.official_model?"official-2026":"legacy-proxy")<<",\n\"geometry_model\":"<<json_string(graph_.capacity_model())<<",\n\"guide_encoding\":"<<json_string(options_.official_model?"global-gcell-regions":large_design()?"width-corridors-and-via-enclosures":"legacy-gcell-envelopes")
+           <<",\n\"guide_encoding_contract\":"<<json_string(options_.official_model && options_.tsv_policy.resource_mode==TsvResourceMode::GLOBAL_GRID?"grid-native-20261024":"historical")
+           <<",\n\"official_scorer_run\":false,\n\"score_evidence\":\"local-model-only\""
            <<",\n\"large_design_schedule\":"<<(large_design()?"true":"false")
            <<",\n\"input_mapping\":{\"thermal\":"<<json_string(thermal_.mapping_mode())
            <<",\"interpolated_cells\":"<<thermal_.interpolated_cells()<<",\"physical_track_capacity_layers\":[";
@@ -1707,6 +1819,21 @@ bool NegotiatedRouter::export_stats(const std::string& path) const {
            <<",\"assignment_polish_thermal_candidates_enabled\":"<<(options_.tsv_policy.polish_thermal_candidates?"true":"false")
            <<",\"assignment_polish_thermal_queries\":"<<policy_.assignment_polish_thermal_queries()
            <<",\"assignment_polish_thermal_candidates\":"<<policy_.assignment_polish_thermal_candidates()
+           <<",\"assignment_block_refine\":"<<(options_.tsv_policy.assignment_block_refine?"true":"false")
+           <<",\"assignment_block_size\":"<<options_.tsv_policy.block_size
+           <<",\"assignment_block_passes_limit\":"<<options_.tsv_policy.block_passes
+           <<",\"assignment_block_max_groups\":"<<options_.tsv_policy.block_max_groups
+           <<",\"assignment_block_max_evaluations\":"<<options_.tsv_policy.block_max_cost_evaluations
+           <<",\"assignment_block_seconds_limit\":"<<options_.tsv_policy.block_max_seconds
+           <<",\"assignment_block_groups\":"<<policy_.assignment_block_groups()
+           <<",\"assignment_block_improvements\":"<<policy_.assignment_block_improvements()
+           <<",\"assignment_block_moved_nets\":"<<policy_.assignment_block_moved_nets()
+           <<",\"assignment_block_cost_evaluations\":"<<policy_.assignment_block_cost_evaluations()
+           <<",\"assignment_block_mst_work\":"<<policy_.assignment_block_mst_work()
+           <<",\"assignment_block_skipped_high_fanout\":"<<policy_.assignment_block_skipped_high_fanout()
+           <<",\"assignment_block_cost_reduction\":"<<policy_.assignment_block_cost_reduction()
+           <<",\"assignment_block_budget_exhausted\":"<<(policy_.assignment_block_budget_exhausted()?"true":"false")
+           <<",\"assignment_block_seconds\":"<<policy_.assignment_block_seconds()
                   <<",\"max_anchor_displacement_dbu\":"<<policy_.assignment_max_displacement_dbu()
            <<",\"slot_capacity\":1,\"tsv_per_cross_net\":1,\"status\":\"engineering global-routing model\"},\n\"metrics\":";
         metrics(best_metrics_);out<<",\n\"initial_metrics\":";metrics(initial_metrics_);
@@ -1746,7 +1873,10 @@ bool NegotiatedRouter::export_stats(const std::string& path) const {
            <<",\"v5_topology_candidates\":"<<counters_.v5_topology_candidates
            <<",\"v5_topology_accepted\":"<<counters_.v5_topology_accepted
            <<",\"v5_topology_failures\":"<<counters_.v5_topology_failures
-           <<",\"v5_topology_thermal_rejections\":"<<counters_.v5_topology_thermal_rejections<<"},\n\"assignment\":[";
+           <<",\"v5_topology_thermal_rejections\":"<<counters_.v5_topology_thermal_rejections
+           <<",\"v5_topology_budget_skips\":"<<counters_.v5_topology_budget_skips
+           <<",\"v5_topology_interruptions\":"<<counters_.v5_topology_interruptions
+           <<",\"v5_topology_seconds\":"<<counters_.v5_topology_seconds<<"},\n\"assignment\":[";
         bool first=true;for(size_t i=0;i<routes_.size();++i) if(routes_[i].slot>=0) {
             if(!first) out<<',';
             first=false;const auto& s=policy_.slots()[routes_[i].slot];
@@ -1773,6 +1903,7 @@ bool NegotiatedRouter::export_stats(const std::string& path) const {
            <<",\"fast_layer_pruning\":"<<(options_.fast_layer_pruning?"true":"false")
            <<",\"v5_pin_rooted\":"<<(options_.v5_pin_rooted?"true":"false")
            <<",\"v5_topology_max_pins\":"<<options_.v5_topology_max_pins
+           <<",\"v5_topology_seconds_limit\":"<<v5_topology_seconds_limit()
            <<",\"tsv_local\":"<<(options_.tsv_local?"true":"false")<<"},\n";
 #if defined(__linux__)
         struct rusage resource_usage{};

@@ -16,6 +16,35 @@
 namespace eda {
 namespace {
 constexpr double eps = 1e-6;
+constexpr size_t global_grid_cell_limit = 4000000;
+// Guide coordinates are integral DBU. Clip inward so neighboring abstract
+// landings have disjoint interiors and never expand beyond a cell or DIEAREA.
+bool global_cell_region(const GCellGrid& grid,const Rect& die,int col,int row,Rect& region) {
+    const auto box=grid.get_cell_rect(col,row);
+    const double x1=std::ceil(std::max(box.x1,die.x1)),y1=std::ceil(std::max(box.y1,die.y1));
+    const double x2=std::floor(std::min(box.x2,die.x2)),y2=std::floor(std::min(box.y2,die.y2));
+    if (x1>=x2 || y1>=y2) return false;
+    region={x1,y1,x2,y2};return true;
+}
+size_t global_grid_capacity(const DefParser& def) {
+    const auto& grid=def.gcell_grid();const auto& die=def.die_area();
+    if (!grid.valid() || !std::isfinite(die.x1) || !std::isfinite(die.y1) ||
+        !std::isfinite(die.x2) || !std::isfinite(die.y2) || die.width()<=0 || die.height()<=0)
+        throw std::runtime_error("GLOBAL_GRID requires a valid GCell grid and DIEAREA");
+    const size_t cols=static_cast<size_t>(grid.cols),rows=static_cast<size_t>(grid.rows);
+    if (cols>global_grid_cell_limit/rows)
+        throw std::runtime_error("TSV_GLOBAL_GRID_BUDGET: grid exceeds 4000000 cells");
+    // Legal clipping is separable: the preflight uses O(cols+rows) work and
+    // no graph/candidate allocation, even for a large public input.
+    size_t legal_cols=0,legal_rows=0;
+    for (int c=0;c<grid.cols;++c)
+        legal_cols+=std::ceil(std::max(grid.x_lines[c],die.x1))<
+                    std::floor(std::min(grid.x_lines[c+1],die.x2));
+    for (int r=0;r<grid.rows;++r)
+        legal_rows+=std::ceil(std::max(grid.y_lines[r],die.y1))<
+                    std::floor(std::min(grid.y_lines[r+1],die.y2));
+    return legal_cols*legal_rows;
+}
 bool same(Point a, Point b) { return a.distance_to(b) <= eps; }
 bool contains(const Rect& outer, const Rect& inner) {
     return inner.x1 >= outer.x1 - eps && inner.y1 >= outer.y1 - eps &&
@@ -339,6 +368,14 @@ void TsvPolicy::preflight(const DefParser& def,const LefParser& lef,TsvPolicyOpt
         throw std::runtime_error("invalid TSV candidate bounds: require 1 <= initial <= maximum <= 65536");
     size_t cross=0,bottom=0,top=0;
     for (const auto& net:def.nets()) cross+=net.is_cross_die;
+    if (options.resource_mode==TsvResourceMode::GLOBAL_GRID) {
+        const size_t available=global_grid_capacity(def);
+        if (cross>available)
+            throw std::runtime_error("TSV_GLOBAL_GRID_SUPPLY: cross_die_nets="+std::to_string(cross)+
+                ", positive-area integer GCells="+std::to_string(available)+
+                "; one crossing per cell is a conservative implementation policy");
+        return;
+    }
     if (!cross) return;
     for (const auto& [name,component]:def.components()) {
         if (component.macro_type.find("RESOURCE_SLOT")==std::string::npos) continue;
@@ -366,6 +403,32 @@ TsvPolicy::TsvPolicy(const DefParser& def, const LefParser& lef, const RoutingGr
                      TsvPolicyOptions options)
     : def_(def),lef_(lef),graph_(graph),options_(options) {
     preflight(def,lef,options);
+    if (options_.resource_mode==TsvResourceMode::GLOBAL_GRID) {
+        if (!graph_.global_guide_mode())
+            throw std::runtime_error("GLOBAL_GRID TSV resources require GLOBAL_GUIDE routing geometry");
+        projected_=true;
+        const auto& grid=graph_.grid();
+        slots_.reserve(global_grid_capacity(def));
+        global_cell_slots_.assign(static_cast<size_t>(grid.cols)*grid.rows,-1);
+        for (int row=0;row<grid.rows;++row) for (int col=0;col<grid.cols;++col) {
+            const int lower=graph_.node(col,row,10),upper=graph_.node(col,row,11);
+            Rect region;
+            if (!graph_.legal_node(lower) || !graph_.legal_node(upper) ||
+                !global_cell_region(grid,def_.die_area(),col,row,region)) continue;
+            SlotCandidate slot;slot.id=static_cast<int>(slots_.size());slot.projected=true;
+            slot.region=slot.lower_pad=slot.upper_pad=slot.envelope=region;
+            slot.point=region.center();slot.lower_node=lower;slot.upper_node=upper;
+            global_cell_slots_[static_cast<size_t>(row)*grid.cols+col]=slot.id;
+            slots_.push_back(std::move(slot));
+        }
+        size_t cross=0;for (const auto& net:def_.nets()) cross+=net.is_cross_die;
+        if (cross>slots_.size())
+            throw std::runtime_error("TSV_GLOBAL_GRID_SUPPLY: legal routing cells cannot accommodate all cross-die nets");
+        // No fabricated instance names or physical VIA witness. Every candidate
+        // is an independent abstract GCell landing with unit occupancy.
+        enabled_.assign(slots_.size(),true);
+        return;
+    }
     std::vector<const ViaInfo*> vias;
     for (const auto& [name,via]:lef.vias()) {
         if (via.top_of_stack_only) continue; // No stack-top context model: never ignore the restriction.
@@ -568,9 +631,16 @@ bool TsvPolicy::compatible(const Net& net,int id) const {
     // Both fixed interface pins must remain connected. An aligned M10/M11 pair
     // forces a crossing at its original position; moving to another slot would
     // create an unexplained second electrical connection even with edge-touch.
-    for (const auto& lower:net.pins) if (lower.layer_idx==10)
-        for (const auto& upper:net.pins) if (upper.layer_idx==11 && same(lower.coord,upper.coord))
-            if (!same(lower.coord,slots_[id].point)) return false;
+    for (const auto& lower:net.pins) if (lower.layer_idx==10) {
+        for (const auto& upper:net.pins) if (upper.layer_idx==11 && same(lower.coord,upper.coord)) {
+            if (options_.resource_mode==TsvResourceMode::GLOBAL_GRID) {
+                const auto& slot=slots_[id];const auto& grid=graph_.grid();
+                if (grid.get_col(lower.coord.x)!=graph_.col(slot.lower_node) ||
+                    grid.get_row(lower.coord.y)!=graph_.row(slot.lower_node) ||
+                    !slot.region.contains(lower.coord) || !slot.region.contains(upper.coord)) return false;
+            } else if (!same(lower.coord,slots_[id].point)) return false;
+        }
+    }
     return true;
 }
 
@@ -664,13 +734,17 @@ std::vector<int> TsvPolicy::assign_projected(const std::vector<Net>& nets,const 
     std::vector<int> result(nets.size(),-1);if (cross.empty()) return result;
     const size_t available=enabled_slots();
     if (available<cross.size())
-        throw std::runtime_error("TSV projected geometry supply insufficient: "+std::to_string(available)+
+        throw std::runtime_error(options_.resource_mode==TsvResourceMode::GLOBAL_GRID ?
+            "TSV_GLOBAL_GRID_SUPPLY: "+std::to_string(available)+" global GCell landings for "+
+                std::to_string(cross.size())+" cross-die nets" :
+            "TSV projected geometry supply insufficient: "+std::to_string(available)+
             " nonoverlapping VIA/OBS-checked reservations for "+std::to_string(cross.size())+
             " cross-die nets; this is a conservative engineering model");
     SlotPointIndex index(slots_,enabled_);
     std::map<PointBucket,std::vector<int>> exact;
-    for (int id=0;id<static_cast<int>(slots_.size());++id) if (enabled_[id])
-        exact[point_bucket(slots_[id].point)].push_back(id);
+    if (options_.resource_mode!=TsvResourceMode::GLOBAL_GRID)
+        for (int id=0;id<static_cast<int>(slots_.size());++id) if (enabled_[id])
+            exact[point_bucket(slots_[id].point)].push_back(id);
     std::vector<Point> anchors;std::vector<std::vector<Point>> forced;
     anchors.reserve(cross.size());forced.reserve(cross.size());
     for (int n:cross) {anchors.push_back(pin_median_anchor(nets[n]));forced.push_back(fixed_crossings(nets[n]));}
@@ -693,6 +767,14 @@ std::vector<int> TsvPolicy::assign_projected(const std::vector<Net>& nets,const 
         for (size_t n=0;n<cross.size();++n) {
             std::vector<int> pool;
             if (forced[n].empty()) pool=index.nearest(anchors[n],limit);
+            else if (options_.resource_mode==TsvResourceMode::GLOBAL_GRID) {
+                const auto point=forced[n].front();const auto& grid=graph_.grid();
+                const int col=grid.get_col(point.x),row=grid.get_row(point.y);
+                if (col>=0 && row>=0) {
+                    const int id=global_cell_slots_[static_cast<size_t>(row)*grid.cols+col];
+                    if (compatible(nets[cross[n]],id)) pool.push_back(id);
+                }
+            }
             else near_point(exact,forced[n].front(),[&](int id){if (compatible(nets[cross[n]],id)) pool.push_back(id);});
             if (pool.size()>edge_budget-edge_count)
                 throw std::runtime_error("TSV_CANDIDATE_BUDGET: projected sparse candidate graph exceeds 8000000 edges");
@@ -1039,13 +1121,17 @@ bool TsvPolicy::validate_mapping(const Net& net,const std::vector<GuideRect>& gu
     if (!net.is_cross_die) return true;
     if (positive!=1) return fail("guide infers "+std::to_string(positive)+" positive-area TSV pairs; policy requires exactly one");
     const auto& slot=slots_[id];
+    const bool global=options_.resource_mode==TsvResourceMode::GLOBAL_GRID;
     if (!contains(slot.region,inferred)||!contains(inferred,slot.envelope))
-        return fail("inferred TSV overlap must contain the actual VIA envelope inside the selected resource projection");
+        return fail(global ? "inferred TSV overlap must equal the selected global GCell landing" :
+            "inferred TSV overlap must contain the actual VIA envelope inside the selected resource projection");
     for (const auto& crossing:crosses) if (!contains(inferred,crossing))
-        return fail("extra M10/M11 electrical connection outside the planned VIA, including edge-touch");
+        return fail(global ? "extra M10/M11 electrical connection outside the global GCell landing, including edge-touch" :
+            "extra M10/M11 electrical connection outside the planned VIA, including edge-touch");
     const auto p=inferred.center();const auto& grid=graph_.grid();
     if (grid.get_col(p.x)!=grid.get_col(slot.point.x)||grid.get_row(p.y)!=grid.get_row(slot.point.y))
-        return fail("inferred thermal TSV cell differs from the planned physical TSV cell");
+        return fail(global ? "inferred thermal TSV cell differs from the selected global GCell landing" :
+            "inferred thermal TSV cell differs from the planned physical TSV cell");
     return true;
 }
 } // namespace eda

@@ -45,7 +45,9 @@ struct RouterCounters {
            abstract_terminal_accesses{}, port_terminal_accesses{}, omitted_checker_apertures{}, fast_initial_paths{},
            fast_tree_shortcuts{}, fast_truncated_paths{}, fast_z_candidates{}, fast_z_paths{}, fast_layer_prunes{},
            v5_topology_attempted{}, v5_topology_candidates{}, v5_topology_accepted{},
-           v5_topology_failures{}, v5_topology_thermal_rejections{};
+           v5_topology_failures{}, v5_topology_thermal_rejections{},
+           v5_topology_budget_skips{}, v5_topology_interruptions{};
+    double v5_topology_seconds{};
 };
 // One undirected resource key; a Net consumes each resource only once.
 using EdgeKey = uint64_t;
@@ -63,6 +65,8 @@ struct PinAccess {
     int vias{};
 };
 struct NetRoute {
+    // Stable index into the router's sparse own-pin exemption cache.
+    size_t net_index{std::numeric_limits<size_t>::max()};
     // Explicit terminal-to-terminal geometry still reserves the crossed graph
     // resources, but must not emit a second path through their GCell centers.
     bool explicit_geometry{false};
@@ -76,6 +80,7 @@ struct NetRoute {
 };
 struct CompleteMetrics {
     bool official_model{false};
+    bool score_20261020{false};
     OfficialGuideMetrics official;
     GuideMetrics guide;
     long long physical_overflow{};
@@ -117,6 +122,7 @@ private:
     TsvPolicy policy_;
     std::unique_ptr<NativeFluteBaseline> flute_;
     std::vector<double> reference_lengths_;
+    std::vector<std::vector<int>> own_pin_nodes_;
     long double full_reference_{0};
     std::vector<NetRoute> routes_;
     GuideMap guides_;
@@ -153,14 +159,20 @@ private:
     mutable bool complete_validation_cached_{false};
     mutable size_t complete_validations_{0}, complete_validation_cache_hits_{0};
     bool complete_{false}, initial_build_{true};
+    bool v5_topology_trial_{false};
     bool recovery_cell_cost_{false};
     BudgetedRecoveryStats recovery_stats_;
     bool large_design() const { return def_.nets().size()>1000; }
     bool timed_out() const;
+    double v5_topology_seconds_limit() const { return std::min(120.0,0.05*options_.time_limit); }
+    void check_v5_topology_budget() const;
+    bool v5_topology_better(const NetRoute&,const NetRoute&,const CompleteMetrics&) const;
     double official_congestion_price() const;
     const std::vector<int>& cell_owners(int) const;
     double edge_cost(int,int,const NetRoute&) const;
-    double access_cost(const PinAccess&) const;
+    double access_cost(const PinAccess&,const NetRoute* own=nullptr) const;
+    bool pin_exempt(size_t net,int node) const;
+    bool validate_route(size_t,const std::vector<GuideRect>&,std::string&) const;
     std::vector<PinAccess> accesses(Point,int,int,int,bool terminal_escape=true);
     std::vector<PinAccess> accesses(const Pin&,int,int);
     NetRoute build_candidate(size_t,int,int);

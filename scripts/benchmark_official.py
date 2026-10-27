@@ -355,7 +355,7 @@ def main(argv=None):
     parser.add_argument("--baseline-stats", type=Path)
     parser.add_argument("--validator", type=Path)
     parser.add_argument("--validator-timeout", type=positive_number, default=180)
-    parser.add_argument("--tsv-resource-mode", choices=("auto", "paired", "projected"), default="auto")
+    parser.add_argument("--tsv-resource-mode", choices=("auto", "paired", "projected", "global-grid"), default="auto")
     parser.add_argument("router_args", nargs=argparse.REMAINDER, help="additional router arguments after --")
     args = parser.parse_args(argv)
     try:

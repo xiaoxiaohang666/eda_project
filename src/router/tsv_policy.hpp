@@ -3,7 +3,7 @@
 #include "parser/thermal_parser.hpp"
 
 namespace eda {
-enum class TsvResourceMode { AUTO, PAIRED, PROJECTED };
+enum class TsvResourceMode { AUTO, PAIRED, PROJECTED, GLOBAL_GRID };
 struct TsvPolicyOptions {
     TsvResourceMode resource_mode{TsvResourceMode::AUTO};
     size_t nearest_candidates{8};
@@ -47,6 +47,8 @@ struct SlotCandidate {
 // the global projection of real reservations and explicit VIA/OBS geometry.
 // One TSV/net and one net/reservation remain conservative engineering policies;
 // neither this projection nor the nearest-candidate heuristic is official DRC.
+// Explicit GLOBAL_GRID uses one abstract M10/M11 Guide landing per GCell,
+// without interpreting placement reservations as global-routing restrictions.
 class TsvPolicy {
 public:
     // Geometry-free policy bound. Call before graph allocation on large inputs.
@@ -57,6 +59,7 @@ public:
     int slot_capacity(int) const { return 1; }
     int net_tsv_count(const Net& net) const { return net.is_cross_die ? 1 : 0; }
     const char* pairing_mode() const {
+        if (options_.resource_mode==TsvResourceMode::GLOBAL_GRID) return "global-grid";
         return projected_ ? "resource-projection-via-geometry" : "transformed-port-center";
     }
     const char* assignment_mode() const {
@@ -102,6 +105,9 @@ private:
     TsvPolicyOptions options_;
     bool projected_{false};
     std::vector<bool> enabled_;
+    // Only GLOBAL_GRID populates this compact cell -> candidate lookup. Fixed
+    // interface pins need their containing cell, not an exact center match.
+    std::vector<int> global_cell_slots_;
     mutable size_t assignment_candidate_edges_{0}, assignment_expansions_{0};
     mutable size_t assignment_global_completions_{0};
     mutable double assignment_max_displacement_dbu_{0};

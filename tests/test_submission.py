@@ -62,6 +62,7 @@ class SubmissionEntrypointTests(unittest.TestCase):
         self.assertEqual(received["args"][:4],
                          ["--model", "official", "--official-runtime",
                           str(self.package / "runtime/official-flute")])
+        self.assertEqual(received["args"][4:6], ["--score-profile", "20261020"])
         self.assertEqual(received["library_path"],
                          f"{self.package}/lib:{self.package}/runtime/official-flute")
 

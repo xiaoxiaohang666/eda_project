@@ -1,7 +1,15 @@
 #include "validation/guide_validator.hpp"
+#include "scoring/compat_validation.hpp"
 #include <queue>
 
 namespace eda {
+bool validate_net_guides(const Net& net, const Rect& die, const LefParser& lef,
+                         const std::vector<GuideRect>& rects, std::string& error,
+                         double gcell_pitch_x, double gcell_pitch_y) {
+    const auto result = compat::validate_net(net, die, lef, rects, gcell_pitch_x, gcell_pitch_y);
+    error = result.errors.empty() ? std::string{} : result.errors.front();
+    return result.error_count == 0;
+}
 bool validate_net_guides(const Net& net, const Rect& die, const LefParser& lef,
                          const std::vector<GuideRect>& rects, std::string& error) {
     error.clear();

@@ -23,17 +23,25 @@ std::string technology() {
         "MACRO RESOURCE_SLOT_top SIZE 2 BY 2 ; END RESOURCE_SLOT_top "
         "MACRO TSV_BOTTOM SIZE 2 BY 2 ; PIN TSV_PORT PORT LAYER metal10 ; RECT 0.5 0.5 1.5 1.5 ; END END TSV_PORT END TSV_BOTTOM "
         "MACRO TSV_TOP SIZE 2 BY 2 ; PIN TSV_PORT PORT LAYER metal11 ; RECT 0.5 0.5 1.5 1.5 ; END END TSV_PORT END TSV_TOP "
-        "LAYER tsv TYPE CUT ; END tsv VIA tsv_v DEFAULT LAYER metal10 ; RECT -0.25 -0.25 0.25 0.25 ; "
-        "LAYER tsv ; RECT -0.25 -0.25 0.25 0.25 ; LAYER metal11 ; RECT -0.25 -0.25 0.25 0.25 ; END tsv_v\n";
+        // Match the 10-DBU GCell and TSV_PORT aperture exactly. Fractional-DBU
+        // pads exercise the legacy encoder's rounding instead of topology.
+        "LAYER tsv TYPE CUT ; END tsv VIA tsv_v DEFAULT LAYER metal10 ; RECT -0.5 -0.5 0.5 0.5 ; "
+        "LAYER tsv ; RECT -0.5 -0.5 0.5 0.5 ; LAYER metal11 ; RECT -0.5 -0.5 0.5 0.5 ; END tsv_v\n";
 }
-std::string design() {
+std::string design(bool sparse_layer20=false) {
     constexpr int cases=24;
     std::ostringstream out;out<<"UNITS DISTANCE MICRONS 10 ; DIEAREA ( 0 0 ) ( 300 300 ) ; "
         "GCELLGRID X 0 DO 31 STEP 10 ; GCELLGRID Y 0 DO 31 STEP 10 ; ";
-    for(int layer=1;layer<=20;++layer)
-        out<<"TRACKS X 0.5 DO 300 STEP 1 LAYER "<<get_layer_name(layer)<<" ; TRACKS Y 0.5 DO 300 STEP 1 LAYER "<<get_layer_name(layer)<<" ; ";
-    out<<"COMPONENTS 2 ; - slot_b RESOURCE_SLOT_bottom + PLACED ( 40 40 ) N ; "
-        "- slot_t RESOURCE_SLOT_top + PLACED ( 40 40 ) N ; END COMPONENTS PINS "<<cases*6+4<<" ; ";
+    for(int layer=1;layer<=20;++layer) {
+        if(sparse_layer20 && layer==20)
+            out<<"TRACKS X 250.5 DO 1 STEP 1 LAYER metal20 ; TRACKS Y 250.5 DO 1 STEP 1 LAYER metal20 ; ";
+        else out<<"TRACKS X 0.5 DO 300 STEP 1 LAYER "<<get_layer_name(layer)<<" ; TRACKS Y 0.5 DO 300 STEP 1 LAYER "<<get_layer_name(layer)<<" ; ";
+    }
+    out<<"COMPONENTS "<<2*(cases+1)<<" ; ";
+    for(int c=0;c<=cases;++c) for(int side=0;side<2;++side)
+        out<<"- slot_"<<c<<'_'<<side<<" RESOURCE_SLOT_"<<(side?"top":"bottom")
+           <<" + PLACED ( "<<45+40*(c%5)<<' '<<45+40*(c/5)<<" ) N ; ";
+    out<<"END COMPONENTS PINS "<<cases*6+4<<" ; ";
     // Deterministic asymmetric fanouts vary the local tree's shape, layer and
     // orientation relative to one distant landing without using random seeds.
     for(int c=0;c<cases;++c) for(int side=0;side<2;++side) for(int p=0;p<3;++p) {
@@ -72,6 +80,67 @@ struct PinLocalTestAccess {
             router.official_reference_,router.official_squared_overflow_,router.official_overflow_,
             router.official_zero_capacity_cells_,router.state_generation_);
     }
+    static void quality_regression(NegotiatedRouter& router) {
+        const int node=router.graph_.node(0,0,20);
+        require(router.graph_.official_capacity(node)==0 && router.graph_.official_obstacle_demand(node)==0 &&
+                router.demand_[node]==0,"score regression requires a real empty zero-capacity resource");
+        // A route that avoids one zero cell can still lose far more wire score
+        // than it gains in congestion once other nets already occupy 99 cells.
+        // This snapshot is intentionally independent of topology generation.
+        CompleteMetrics base;base.guide.wirelength=base.guide.reference=1000;
+        base.official.zero_capacity_cells=99;base.official.squared_normalized_overflow=990000;
+        NetRoute baseline;baseline.measured.wirelength=baseline.measured.reference=1000;
+        baseline.measured.demand={{node,1}};
+        NetRoute longer;longer.measured.reference=1000;longer.measured.wirelength=1200;
+        const auto old_key=router.official_candidate_key(baseline,base),new_key=router.official_candidate_key(longer,base);
+        require(new_key<old_key && std::get<1>(new_key)>std::get<1>(old_key),
+                "fixture must expose a legacy lexicographic win that loses actual W/C quality");
+        require(!router.v5_topology_better(longer,baseline,base),"V5 accepts a zero-cell reduction that lowers real quality");
+        longer.measured.wirelength=1000;
+        require(router.v5_topology_better(longer,baseline,base),"V5 rejects a real congestion improvement with equal wire cost");
+    }
+    static void budget_regression(NegotiatedRouter& router) {
+        using Clock=std::chrono::steady_clock;
+        const auto index=static_cast<size_t>(std::find_if(router.def_.nets().begin(),router.def_.nets().end(),
+            [](const Net& net){return net.is_cross_die && net.pins.size()>2;})-router.def_.nets().begin());
+        const int slot=router.policy_.slots().front().id;
+        router.options_.v5_pin_rooted=false;
+        const auto baseline=router.build_route(index,slot);
+        const auto snapshot=ledger(router);
+        const auto deadline=router.deadline_;
+        const double used=router.counters_.v5_topology_seconds,limit=router.v5_topology_seconds_limit();
+        require(limit==std::min(120.0,router.options_.time_limit*0.05),"V5 cumulative limit must reserve the routing budget");
+        require(used>0 && used<limit,"successful trials must charge their elapsed work without exhausting this fixture");
+        router.options_.v5_pin_rooted=true;
+        // Less than one clock tick remains: the real trial enters its scoped
+        // deadline, fails before altering the incumbent, and restores the
+        // original deadline. No sleeps or wall-clock race are required.
+        router.counters_.v5_topology_seconds=std::nextafter(limit,0.0);
+        const auto attempts=router.counters_.v5_topology_attempted,interruptions=router.counters_.v5_topology_interruptions;
+        const auto failures=router.counters_.v5_topology_failures;
+        require(signature(router.build_route(index,slot))==signature(baseline),"expired extra-work trial discarded its legal incumbent");
+        require(router.counters_.v5_topology_attempted==attempts+1 && router.counters_.v5_topology_interruptions==interruptions+1 &&
+                router.counters_.v5_topology_failures==failures,"work-budget interruption was not classified separately");
+        require(router.deadline_==deadline && !router.v5_topology_trial_ && !router.timed_out(),
+                "optional trial leaked its temporary deadline or active flag into baseline routing");
+        require(ledger(router)==snapshot && router.counters_.v5_topology_seconds>=limit,
+                "interrupted trial changed ownership or failed to charge its actual elapsed time");
+        const auto skips=router.counters_.v5_topology_budget_skips;
+        require(signature(router.build_route(index,slot))==signature(baseline) &&
+                router.counters_.v5_topology_attempted==attempts+1 && router.counters_.v5_topology_budget_skips==skips+1,
+                "exhausted cumulative budget did not leave subsequent baseline construction usable");
+        // Fast-template and encoding entry points also observe the scoped
+        // budget; unlike A*, these paths previously did not test its clock.
+        router.v5_topology_trial_=true;router.deadline_=Clock::now()-std::chrono::seconds(1);
+        bool search_stopped=false,encode_stopped=false;
+        try {router.search(baseline.accesses,baseline.nodes,NetRoute{},1,9,false);}catch(const std::runtime_error&) {search_stopped=true;}
+        auto copy=baseline;
+        try {router.encode(index,copy);}catch(const std::runtime_error&) {encode_stopped=true;}
+        router.v5_topology_trial_=false;router.deadline_=deadline;
+        require(search_stopped && encode_stopped,"template or encoding work ignored the optional deadline");
+        require(ledger(router)==snapshot,"budget enforcement mutated an ownership or score ledger");
+        router.counters_.v5_topology_seconds=used;
+    }
     static void run(NegotiatedRouter& router) {
         require(router.large_design(),"fixture must exercise large-design fast initial paths");
         require(!router.options_.v5_pin_rooted,"new topology must default off");
@@ -92,6 +161,8 @@ struct PinLocalTestAccess {
             const auto base=router.official_candidate_base();
             require(router.official_candidate_key(chosen,base)<=router.official_candidate_key(baseline,base),
                 "enabled topology worsens exact official W/C acceptance key");
+            require(std::get<1>(router.official_candidate_key(chosen,base))<=std::get<1>(router.official_candidate_key(baseline,base)),
+                "enabled topology lowered actual W/C quality while reducing zero-capacity cells");
             require(chosen.slot==baseline.slot && chosen.measured.tsv_cells==baseline.measured.tsv_cells &&
                 chosen.measured.tsv_points.size()==baseline.measured.tsv_points.size(),"topology changed landing or thermal cells");
             for(size_t k=0;k<chosen.measured.tsv_points.size();++k)
@@ -118,6 +189,7 @@ struct PinLocalTestAccess {
         require(improvements>0,"representative fanouts show no real exact-score improvement");
         require(kept_baseline>0,"fixture does not cover rejection in favor of baseline");
         require(router.counters_.v5_topology_failures==0,"candidate path or connectivity unexpectedly fails");
+        budget_regression(router);
         std::cout<<"Topology improvements="<<improvements<<", baseline retained="<<kept_baseline<<'\n';
     }
 };
@@ -136,6 +208,9 @@ int main(int argc,char** argv) {
         options.graph_options.geometry=RoutingGeometryMode::GLOBAL_GUIDE;
         options.official_metrics.gcell_width_dbu=10;options.official_metrics.gcell_height_dbu=10;
         NegotiatedRouter router(def,lef,thermal,options);PinLocalTestAccess::run(router);
+        DefParser sparse;
+        require(sparse.parse(write(folder/"topology-zero.def",design(true)),lef,DefGridMapping::OFFICIAL_FULL),"zero-capacity fixture parses");
+        NegotiatedRouter zero(sparse,lef,thermal,options);PinLocalTestAccess::quality_regression(zero);
         std::cout<<"PASS v5 pin-rooted topology, exact-score acceptance, TSV invariance, ledger immutability, off and fanout guards: "<<checks<<" checks\n";
     } catch(const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}
 }

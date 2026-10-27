@@ -113,7 +113,7 @@ def create_package(binary: Path, runtime: Path, destination: Path) -> dict:
         "includes_uncommitted_worktree_sources": True,
         "entrypoint": "run.sh",
         "target": "Linux x86-64, Ubuntu 22.04 / glibc >= 2.35",
-        "profile": "official, weighted heat=2, polish=32/8/bidirectional, score pricing, RRR=512; recovery disabled",
+        "profile": "v6 compatible-20261020/global-grid, preferred-direction guides, own-pin demand exemption, plateau W; heat=2, polish=32/8/bidirectional, score pricing, RRR=512; block/topology/recovery disabled",
         "files": [{"path": name, "size": (package / name).stat().st_size, "sha256": before[name]}
                   for name in sorted(sources)],
     }

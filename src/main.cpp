@@ -9,7 +9,7 @@
 
 namespace {
 void usage(const char* p) {
-    std::cout<<"3D IC Global Router v5\nUsage: "<<p<<" --def FILE --lef FILE --thermal-report FILE --output FILE\n"
+    std::cout<<"3D IC Global Router v6\nUsage: "<<p<<" --def FILE --lef FILE --thermal-report FILE --output FILE\n"
         <<"Input aliases: --input-def, --lefs (repeatable), --thermal-json, -o\n"
         <<"--router negotiated|baseline  (default negotiated)\n"
         <<"--rrr-rounds N  --tsv-rounds N  (defaults 30, 10)\n"
@@ -23,11 +23,12 @@ void usage(const char* p) {
         <<"--time-limit SECONDS (default 120; scales with large net count)  --local-repair 0|1 (default 1)\n"
         <<"--wirelength-rounds N (default 3)  --pin-local 0|1 (default 1)\n"
         <<"--tsv-local 0|1 (default 1)  Fixed-TSV terminal path recovery\n"
-        <<"--tsv-resource-mode auto|paired|projected (default auto) --tsv-candidates N --tsv-max-candidates N\n"
+        <<"--tsv-resource-mode auto|paired|projected|global-grid (default auto) --tsv-candidates N --tsv-max-candidates N\n"
         <<"--cell-pin-access 0|1 --fast-initial 0|1 (defaults 1)\n"
         <<"--fast-quality 0|1 (default 1; bounded official fast tree/Z improvements)\n"
         <<"--fast-layer-pruning 0|1 (default 1; equivalent pruning of dominated L candidates)\n"
-        <<"--model physical|official (default physical; official matches new score)\n"
+        <<"--model physical|official (default physical; official is the historical local contest model)\n"
+        <<"--score-profile legacy-20261011|20261020 (default legacy-20261011; historical profiles, not the unpublished platform scorer)\n"
         <<"--official-score-pricing 0|1 (default 0; derivative-scaled W/C congestion prices)\n"
         <<"--official-runtime DIR --nonpreferred 0|1 (official Guide model)\n"
         <<"--tsv-assignment-polish 0|1 (default 0; projected resource move/swap proxy optimization)\n"
@@ -59,14 +60,14 @@ int main(int argc,char** argv) {
         if(argc<2) {usage(argv[0]);return 1;}
         std::string def_file,thermal_file,output="output/result.guide",stats,kind="negotiated";
         std::vector<std::string> lefs;eda::RouterOptions options;bool explicit_time=false,explicit_polish_heat=false,explicit_polish_thermal=false,explicit_polish_budget=false,explicit_rrr_limit=false,explicit_recovery_budget=false;
-        bool explicit_block_budget=false,explicit_topology_budget=false;
+        bool explicit_block_budget=false,explicit_topology_budget=false,explicit_nonpreferred=false;
         for(int i=1;i<argc;++i) {
             std::string arg=argv[i];if(arg=="--help"||arg=="-h") {usage(argv[0]);return 0;}
             const std::set<std::string> recognized={"--def","--input-def","--lef","--lefs","--thermal-report","--thermal-json",
                 "--output","-o","--stats","--router","--rrr-rounds","--rrr-score-aware","--rrr-net-limit","--tsv-rounds","--search","--time-limit","--search-limit","--local-repair","--wirelength-rounds","--pin-local","--tsv-local","--tsv-resource-mode","--tsv-candidates","--tsv-max-candidates","--cell-pin-access","--fast-initial","--fast-quality","--fast-layer-pruning","--model","--official-runtime","--official-score-pricing","--nonpreferred","--tsv-assignment-polish","--tsv-polish-heat-weight","--tsv-polish-thermal","--tsv-polish-candidates","--tsv-polish-passes","--tsv-polish-bidirectional","--tsv-polish-thermal-candidates"};
             const std::set<std::string> recovery_options={"--large-recovery","--large-recovery-nets","--large-recovery-rounds","--large-recovery-seconds","--large-recovery-branches"};
             const std::set<std::string> v5_options={"--tsv-block-refine","--tsv-block-size","--tsv-block-passes","--tsv-block-max-groups","--tsv-block-max-evals","--tsv-block-seconds","--v5-pin-rooted","--v5-topology-max-pins"};
-            if(!recognized.count(arg)&&!recovery_options.count(arg)&&!v5_options.count(arg)) throw std::runtime_error("unknown option: "+arg);
+            if(!recognized.count(arg)&&!recovery_options.count(arg)&&!v5_options.count(arg)&&arg!="--score-profile") throw std::runtime_error("unknown option: "+arg);
             if(i+1>=argc) throw std::runtime_error("missing option value: "+arg);
             const std::string value=argv[++i];if(value.empty()||value[0]=='-') throw std::runtime_error("invalid option value: "+arg);
             if(arg=="--def"||arg=="--input-def") def_file=value;
@@ -142,6 +143,7 @@ int main(int argc,char** argv) {
                 if(value=="auto") options.tsv_policy.resource_mode=eda::TsvResourceMode::AUTO;
                 else if(value=="paired") options.tsv_policy.resource_mode=eda::TsvResourceMode::PAIRED;
                 else if(value=="projected") options.tsv_policy.resource_mode=eda::TsvResourceMode::PROJECTED;
+                else if(value=="global-grid") options.tsv_policy.resource_mode=eda::TsvResourceMode::GLOBAL_GRID;
                 else throw std::runtime_error("invalid TSV resource mode");
             }
             else if(arg=="--tsv-polish-thermal") {
@@ -184,16 +186,27 @@ int main(int argc,char** argv) {
                 options.official_model=value=="official";
             }
             else if(arg=="--official-runtime") options.official_runtime=value;
+            else if(arg=="--score-profile") {
+                if(value!="legacy-20261011" && value!="20261020") throw std::runtime_error("invalid score profile");
+                options.official_metrics.score_20261020=value=="20261020";
+                options.graph_options.score_20261020=options.official_metrics.score_20261020;
+            }
             else if(arg=="--official-score-pricing") {
                 const int v=integer(value);if(v>1) throw std::runtime_error("official-score-pricing must be 0 or 1");
                 options.official_score_pricing=v;
             }
-            else if(arg=="--nonpreferred") {int v=integer(value);if(v>1) throw std::runtime_error("nonpreferred must be 0 or 1");options.graph_options.allow_nonpreferred=v;}
+            else if(arg=="--nonpreferred") {int v=integer(value);if(v>1) throw std::runtime_error("nonpreferred must be 0 or 1");options.graph_options.allow_nonpreferred=v;explicit_nonpreferred=true;}
             else if(arg=="--search-limit") options.search_limit=size_t(integer(value,true));
             else if(arg=="--local-repair") {int v=integer(value);if(v>1) throw std::runtime_error("local-repair must be 0 or 1");options.local_repair=v;}
             else if(arg=="--search") {if(value!="astar"&&value!="dijkstra") throw std::runtime_error("invalid search");options.dijkstra=value=="dijkstra";}
             else if(arg=="--time-limit") {explicit_time=true;size_t end=0;options.time_limit=std::stod(value,&end);
                 if(end!=value.size()||!std::isfinite(options.time_limit)||options.time_limit<=0) throw std::runtime_error("invalid time limit");}
+        }
+        if(options.official_metrics.score_20261020) {
+            if(!options.official_model) throw std::runtime_error("20261020 score profile requires --model official");
+            if(explicit_nonpreferred && options.graph_options.allow_nonpreferred)
+                throw std::runtime_error("20261020 score profile forbids --nonpreferred 1");
+            options.graph_options.allow_nonpreferred=false;
         }
         if(explicit_polish_heat&&!options.tsv_policy.assignment_polish)
             throw std::runtime_error("--tsv-polish-heat-weight requires --tsv-assignment-polish 1");
@@ -217,6 +230,8 @@ int main(int argc,char** argv) {
             throw std::runtime_error("large recovery requires --model official");
         if(explicit_recovery_budget && !options.large_recovery)
             throw std::runtime_error("large recovery budgets require --large-recovery 1");
+        if(options.tsv_policy.resource_mode==eda::TsvResourceMode::GLOBAL_GRID&&!options.official_model)
+            throw std::runtime_error("global-grid TSV resources require --model official");
         if((options.tsv_policy.assignment_block_refine||options.v5_pin_rooted)&&!options.official_model)
             throw std::runtime_error("v5 assignment/topology optimization requires --model official");
         if(explicit_block_budget&&!options.tsv_policy.assignment_block_refine)

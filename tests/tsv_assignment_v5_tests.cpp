@@ -27,6 +27,8 @@ std::string technology() {
            <<" ; WIDTH 0.2 ; END "<<name<<'\n';
     }
     out<<"MACRO RESOURCE_SLOT_top SIZE 7 BY 7 ; END RESOURCE_SLOT_top\n"
+       <<"MACRO TSV_BOTTOM SIZE 7 BY 7 ; PIN TSV_PORT PORT LAYER metal10 ; RECT 1 1 6 6 ; END END TSV_PORT END TSV_BOTTOM\n"
+       <<"MACRO TSV_TOP SIZE 7 BY 7 ; PIN TSV_PORT PORT LAYER metal11 ; RECT 1 1 6 6 ; END END TSV_PORT END TSV_TOP\n"
        <<"LAYER tsv TYPE CUT ; END tsv\n"
        <<"VIA tsv_v DEFAULT LAYER metal10 ; RECT -2.5 -2.5 2.5 2.5 ; LAYER tsv ; "
        <<"RECT -2.5 -2.5 2.5 2.5 ; LAYER metal11 ; RECT -2.5 -2.5 2.5 2.5 ; END tsv_v\n";

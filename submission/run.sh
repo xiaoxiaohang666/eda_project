@@ -12,6 +12,8 @@ export LD_LIBRARY_PATH="$SUBMISSION_ROOT/lib:$SUBMISSION_ROOT/runtime/official-f
 exec "$SUBMISSION_ROOT/router" \
     --model official \
     --official-runtime "$SUBMISSION_ROOT/runtime/official-flute" \
+    --score-profile 20261020 \
+    --tsv-resource-mode global-grid \
     --tsv-assignment-polish 1 --tsv-polish-heat-weight 2 \
     --tsv-polish-candidates 32 --tsv-polish-passes 8 --tsv-polish-bidirectional 1 \
     --official-score-pricing 1 --rrr-score-aware 1 --rrr-net-limit 512 \

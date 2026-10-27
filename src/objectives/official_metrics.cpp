@@ -70,11 +70,13 @@ std::pair<int,int> interval(double lo,double hi,const std::vector<double>& lines
     return {std::max(0,int(std::upper_bound(lines.begin(),lines.end(),lo)-lines.begin())-1),
             std::min(int(lines.size())-1,int(std::lower_bound(lines.begin(),lines.end(),hi)-lines.begin()))};
 }
-std::vector<int> cells(const GuideRect& g,const RoutingGraph& graph) {
-    const auto& grid=graph.grid();const auto [cb,ce]=interval(g.x1,g.x2,grid.x_lines);
+std::vector<int> cells(const GuideRect& g,const GCellGrid& grid) {
+    const auto [cb,ce]=interval(g.x1,g.x2,grid.x_lines);
     const auto [rb,re]=interval(g.y1,g.y2,grid.y_lines);
     std::vector<int> nodes;nodes.reserve(size_t(std::max(0,ce-cb))*std::max(0,re-rb));
-    for(int r=rb;r<re;++r)for(int c=cb;c<ce;++c)nodes.push_back(graph.node(c,r,get_layer_index(g.layer)));
+    const int layer=get_layer_index(g.layer);
+    for(int r=rb;r<re;++r)for(int c=cb;c<ce;++c)
+        nodes.push_back(((layer-1)*grid.rows+r)*grid.cols+c);
     return nodes;
 }
 std::vector<Rect> crossing_ports(const Net& net,const std::vector<GuideRect>& guides) {
@@ -295,9 +297,26 @@ double official_thermal_gain_for_def_file(const std::string& path) {
 }
 NetGuideMetrics measure_official_net_guides(const Net& net,const std::vector<GuideRect>& raw,
     const RoutingGraph& graph,const LefParser& lef,const OfficialMetricOptions& o,double reference) {
+    if(o.score_20261020!=graph.score_20261020())
+        throw std::runtime_error("graph and metric scoring profiles differ");
+    auto result=measure_official_net_guides(net,raw,graph.grid(),graph.die_area(),lef,o,reference);
+    if(o.score_20261020) {
+        const auto pins=graph.own_pin_nodes(net);
+        result.demand.erase(std::remove_if(result.demand.begin(),result.demand.end(),
+            [&](const auto& entry){return std::binary_search(pins.begin(),pins.end(),entry.first);}),
+            result.demand.end());
+    }
+    return result;
+}
+NetGuideMetrics measure_official_net_guides(const Net& net,const std::vector<GuideRect>& raw,
+    const GCellGrid& grid,const Rect& die,const LefParser& lef,const OfficialMetricOptions& o,double reference) {
     check_options(o);
     if(!std::isfinite(reference)||reference<0)throw std::runtime_error("invalid cached exact official baseline");
-    const auto guides=clean_guides(raw,graph.die_area());
+    if(grid.cols<=0 || grid.rows<=0 || grid.x_lines.size()!=size_t(grid.cols)+1 ||
+        grid.y_lines.size()!=size_t(grid.rows)+1 ||
+        uint64_t(grid.cols)*uint64_t(grid.rows)>uint64_t(std::numeric_limits<int>::max())/20)
+        throw std::runtime_error("official metric grid dimensions are invalid");
+    const auto guides=clean_guides(raw,die);
     NetGuideMetrics result;result.reference=reference;
     std::map<int,int> demand;
     std::unordered_set<int> covered;
@@ -307,7 +326,7 @@ NetGuideMetrics measure_official_net_guides(const Net& net,const std::vector<Gui
         if(direction==Direction::UNKNOWN)throw std::runtime_error("official metric guide layer is not ROUTING");
         if(!net.is_cross_die && !net.pins.empty() && ((net.pins.front().layer_idx<=10)!=(l<=10)))
             throw std::runtime_error("official intra-die net uses the other die");
-        const auto nodes=cells(g,graph);
+        const auto nodes=cells(g,grid);
         for(int n:nodes)demand[n]=1;
         const bool duplicate_cells=std::all_of(nodes.begin(),nodes.end(),[&](int n){return covered.count(n)!=0;});
         if(duplicate_cells)continue;
@@ -322,11 +341,14 @@ NetGuideMetrics measure_official_net_guides(const Net& net,const std::vector<Gui
         }
     }
     if(net.is_cross_die) {
-        const auto point=select_tsv(net,guides);const auto& grid=graph.grid();
+        const auto point=select_tsv(net,guides);
         const int col=grid.get_col(point.x),row=grid.get_row(point.y);
         if(col<0||row<0)throw std::runtime_error("official selected TSV is outside GCell grid");
         result.tsv_points.push_back(point);result.tsv_cells.push_back(row*grid.cols+col);
-        for(int l:{10,11}) {const int node=graph.node(col,row,l);demand[node]=checked_add(demand[node],o.tsv_congestion_ratio);}
+        for(int l:{10,11}) {
+            const int node=((l-1)*grid.rows+row)*grid.cols+col;
+            demand[node]=checked_add(demand[node],o.tsv_congestion_ratio);
+        }
     }
     result.demand.assign(demand.begin(),demand.end());
     return result;
@@ -335,6 +357,8 @@ OfficialGuideMetrics aggregate_official_metrics(const std::vector<const NetGuide
     const std::vector<int>& guide_demand,const RoutingGraph& graph,const ThermalParser& thermal,
     const OfficialMetricOptions& o,bool capture) {
     check_options(o);
+    if(o.score_20261020!=graph.score_20261020())
+        throw std::runtime_error("graph and metric scoring profiles differ");
     if(guide_demand.size()!=graph.size())throw std::runtime_error("official demand dimensions mismatch");
     OfficialGuideMetrics result;auto& out=result.guide;
     if(capture)out.demand.resize(graph.size());
@@ -373,11 +397,21 @@ OfficialGuideMetrics aggregate_official_metrics(const std::vector<const NetGuide
     if(std::none_of(heat.begin(),heat.end(),[](double h){return h>0;}))
         throw std::runtime_error("official thermal scoring requires positive temperature rise");
     out.correlation=PearsonState(std::move(heat),std::move(tsv_counts)).correlation();
-    const double length=std::max(out.normalized,1e-9);
-    result.wirelength_score=100.0*std::min(length,1.0/length);
+    result.wirelength_score=official_wirelength_score(out.wirelength,out.reference,o);
     result.congestion_score=100.0/std::sqrt(1.0+double(sum));
     result.thermal_score=100.0*(0.5+0.5*std::tanh(o.thermal_gain*out.correlation));
     out.quality=(0.45*result.wirelength_score+0.30*result.congestion_score+0.25*result.thermal_score)/100.0;
     return result;
+}
+double official_wirelength_score(double length,double reference,const OfficialMetricOptions& o) {
+    if(!std::isfinite(length)||length<0 || !std::isfinite(reference)||reference<0)
+        throw std::runtime_error("invalid wirelength or reference for official score");
+    if(o.score_20261020) {
+        if(reference<=0)
+            throw std::runtime_error("October 20 wirelength score requires positive total reference");
+        return length<=reference ? 100.0 : 100.0*(reference/length);
+    }
+    const double normalized=std::max(reference>0?length/reference:100.0,1e-9);
+    return 100.0*std::min(normalized,1.0/normalized);
 }
 } // namespace eda
