@@ -9,12 +9,23 @@
 
 namespace {
 void usage(const char* p) {
-    std::cout<<"3D IC Global Router v6\nUsage: "<<p<<" --def FILE --lef FILE --thermal-report FILE --output FILE\n"
+    std::cout<<"3D IC Global Router v7\nUsage: "<<p<<" --def FILE --lef FILE --thermal-report FILE --output FILE\n"
         <<"Input aliases: --input-def, --lefs (repeatable), --thermal-json, -o\n"
         <<"--router negotiated|baseline  (default negotiated)\n"
         <<"--rrr-rounds N  --tsv-rounds N  (defaults 30, 10)\n"
         <<"--rrr-score-aware 0|1 (default 0; official movable-demand congestion priority)\n"
         <<"--rrr-net-limit N (default 128; 1..8192, requires rrr-score-aware 1)\n"
+        <<"--v7-rrr 0|1 (default 0; adaptive RRR and bounded congestion search)\n"
+        <<"--v7-rrr-net-limit N (1..32768, default 4096)\n"
+        <<"--v7-rrr-astar-net-limit N (0..4096, default 64; zero disables maze trials)\n"
+        <<"--v7-rrr-astar-expansions N (1..1000000, default 20000, per rerouted net)\n"
+        <<"--v7-rrr-astar-seconds N (>0..10, default 0.1, per rerouted net)\n"
+        <<"--v7-tsv 0|1 (default 0; post-route TSV/thermal joint refinement)\n"
+        <<"--v7-tsv-nets N (1..32768, default 256) --v7-tsv-candidates N (1..64, default 4)\n"
+        <<"--v7-tsv-seconds N (>0..3600, default 30; within total routing budget)\n"
+        <<"--v7-topology 0|1 (default 0; compare shared pin-rooted trees during initial/refinement routing)\n"
+        <<"--v7-cell-cost 0|1 (default 0; incremental own-tree cell reuse)\n"
+        <<"--resource-profile 20261020|platform-20261024 (default 20261020; local resource contract)\n"
         <<"--large-recovery 0|1 (default 0; bounded fixed-TSV Guide wirelength recovery, official only)\n"
         <<"--large-recovery-nets N (1..4096, default 1024) --large-recovery-rounds N (1..2, default 1)\n"
         <<"--large-recovery-seconds N (0..3600 exclusive of zero, default 300; additional phase budget)\n"
@@ -60,14 +71,15 @@ int main(int argc,char** argv) {
         if(argc<2) {usage(argv[0]);return 1;}
         std::string def_file,thermal_file,output="output/result.guide",stats,kind="negotiated";
         std::vector<std::string> lefs;eda::RouterOptions options;bool explicit_time=false,explicit_polish_heat=false,explicit_polish_thermal=false,explicit_polish_budget=false,explicit_rrr_limit=false,explicit_recovery_budget=false;
-        bool explicit_block_budget=false,explicit_topology_budget=false,explicit_nonpreferred=false;
+        bool explicit_block_budget=false,explicit_topology_budget=false,explicit_nonpreferred=false,explicit_v7_budget=false,explicit_v7_tsv_budget=false;
         for(int i=1;i<argc;++i) {
             std::string arg=argv[i];if(arg=="--help"||arg=="-h") {usage(argv[0]);return 0;}
             const std::set<std::string> recognized={"--def","--input-def","--lef","--lefs","--thermal-report","--thermal-json",
                 "--output","-o","--stats","--router","--rrr-rounds","--rrr-score-aware","--rrr-net-limit","--tsv-rounds","--search","--time-limit","--search-limit","--local-repair","--wirelength-rounds","--pin-local","--tsv-local","--tsv-resource-mode","--tsv-candidates","--tsv-max-candidates","--cell-pin-access","--fast-initial","--fast-quality","--fast-layer-pruning","--model","--official-runtime","--official-score-pricing","--nonpreferred","--tsv-assignment-polish","--tsv-polish-heat-weight","--tsv-polish-thermal","--tsv-polish-candidates","--tsv-polish-passes","--tsv-polish-bidirectional","--tsv-polish-thermal-candidates"};
             const std::set<std::string> recovery_options={"--large-recovery","--large-recovery-nets","--large-recovery-rounds","--large-recovery-seconds","--large-recovery-branches"};
             const std::set<std::string> v5_options={"--tsv-block-refine","--tsv-block-size","--tsv-block-passes","--tsv-block-max-groups","--tsv-block-max-evals","--tsv-block-seconds","--v5-pin-rooted","--v5-topology-max-pins"};
-            if(!recognized.count(arg)&&!recovery_options.count(arg)&&!v5_options.count(arg)&&arg!="--score-profile") throw std::runtime_error("unknown option: "+arg);
+            const std::set<std::string> v7_options={"--v7-topology","--v7-rrr","--v7-rrr-net-limit","--v7-rrr-astar-net-limit","--v7-rrr-astar-expansions","--v7-rrr-astar-seconds","--v7-cell-cost","--resource-profile","--v7-tsv","--v7-tsv-nets","--v7-tsv-candidates","--v7-tsv-seconds"};
+            if(!recognized.count(arg)&&!recovery_options.count(arg)&&!v5_options.count(arg)&&!v7_options.count(arg)&&arg!="--score-profile") throw std::runtime_error("unknown option: "+arg);
             if(i+1>=argc) throw std::runtime_error("missing option value: "+arg);
             const std::string value=argv[++i];if(value.empty()||value[0]=='-') throw std::runtime_error("invalid option value: "+arg);
             if(arg=="--def"||arg=="--input-def") def_file=value;
@@ -77,6 +89,50 @@ int main(int argc,char** argv) {
             else if(arg=="--stats") stats=value;
             else if(arg=="--router") {if(value!="baseline"&&value!="negotiated") throw std::runtime_error("invalid router");kind=value;}
             else if(arg=="--rrr-rounds") options.rrr_rounds=integer(value);
+            else if(v7_options.count(arg)) {
+                if(arg=="--resource-profile") {
+                    if(value!="20261020"&&value!="platform-20261024") throw std::runtime_error("invalid resource profile");
+                    options.graph_options.platform_20261024=value=="platform-20261024";
+                } else if(arg=="--v7-tsv-seconds") {
+                    size_t end=0;const double v=std::stod(value,&end);
+                    if(end!=value.size()||!std::isfinite(v)||v<=0||v>3600) throw std::runtime_error("v7-tsv-seconds must be >0 and <=3600");
+                    options.v7_tsv_seconds=v;explicit_v7_tsv_budget=true;
+                } else if(arg=="--v7-tsv-nets"||arg=="--v7-tsv-candidates") {
+                    const int v=integer(value,true);explicit_v7_tsv_budget=true;
+                    if(arg=="--v7-tsv-nets") {
+                        if(v>32768) throw std::runtime_error("v7-tsv-nets must be 1..32768");
+                        options.v7_tsv_nets=size_t(v);
+                    } else {
+                        if(v>64) throw std::runtime_error("v7-tsv-candidates must be 1..64");
+                        options.v7_tsv_candidates=size_t(v);
+                    }
+                } else if(arg=="--v7-tsv") {
+                    const int v=integer(value);if(v>1) throw std::runtime_error("v7-tsv must be 0 or 1");
+                    options.v7_tsv=v;
+                } else if(arg=="--v7-rrr-astar-seconds") {
+                    size_t end=0;const double v=std::stod(value,&end);
+                    if(end!=value.size()||!std::isfinite(v)||v<=0||v>10) throw std::runtime_error("v7-rrr-astar-seconds must be >0 and <=10");
+                    options.v7_rrr_astar_seconds=v;explicit_v7_budget=true;
+                } else {
+                    const int v=integer(value);
+                    if(arg=="--v7-rrr"||arg=="--v7-cell-cost"||arg=="--v7-topology") {
+                        if(v>1) throw std::runtime_error("v7 boolean option must be 0 or 1");
+                        if(arg=="--v7-rrr") options.v7_rrr=v;else if(arg=="--v7-topology") options.v7_topology=v;else options.v7_cell_cost=v;
+                    } else {
+                        explicit_v7_budget=true;
+                        if(arg=="--v7-rrr-net-limit") {
+                            if(v<1||v>32768) throw std::runtime_error("v7-rrr-net-limit must be 1..32768");
+                            options.v7_rrr_net_limit=size_t(v);
+                        } else if(arg=="--v7-rrr-astar-net-limit") {
+                            if(v>4096) throw std::runtime_error("v7-rrr-astar-net-limit must be 0..4096");
+                            options.v7_rrr_astar_net_limit=size_t(v);
+                        } else {
+                            if(v<1||v>1000000) throw std::runtime_error("v7-rrr-astar-expansions must be 1..1000000");
+                            options.v7_rrr_astar_expansions=size_t(v);
+                        }
+                    }
+                }
+            }
             else if(v5_options.count(arg)) {
                 if(arg=="--tsv-block-seconds") {
                     size_t end=0;const double v=std::stod(value,&end);
@@ -208,6 +264,17 @@ int main(int argc,char** argv) {
                 throw std::runtime_error("20261020 score profile forbids --nonpreferred 1");
             options.graph_options.allow_nonpreferred=false;
         }
+        if((options.v7_topology||options.v7_rrr||options.v7_cell_cost||options.v7_tsv||options.graph_options.platform_20261024) &&
+           (!options.official_model||!options.official_metrics.score_20261020))
+            throw std::runtime_error("v7 routing and platform resources require --model official --score-profile 20261020");
+        if(explicit_v7_tsv_budget&&!options.v7_tsv)
+            throw std::runtime_error("v7 TSV budgets require --v7-tsv 1");
+        if(options.v7_tsv&&options.tsv_policy.resource_mode!=eda::TsvResourceMode::GLOBAL_GRID)
+            throw std::runtime_error("v7 TSV optimization requires --tsv-resource-mode global-grid");
+        if(explicit_v7_budget&&!options.v7_rrr)
+            throw std::runtime_error("v7 RRR budgets require --v7-rrr 1");
+        if(options.v7_rrr&&!options.rrr_score_aware)
+            throw std::runtime_error("v7 RRR requires --rrr-score-aware 1");
         if(explicit_polish_heat&&!options.tsv_policy.assignment_polish)
             throw std::runtime_error("--tsv-polish-heat-weight requires --tsv-assignment-polish 1");
         if(explicit_polish_thermal&&!options.tsv_policy.assignment_polish)

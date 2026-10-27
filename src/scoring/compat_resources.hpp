@@ -14,6 +14,9 @@ namespace eda::compat {
 struct ResourceOptions {
     bool pin_first_layer{true};
     bool deduplicate_tracks{false};
+    // Explicit observed 0.4.0 platform resource policy. This changes resources
+    // only, not physical PIN geometry or October 20 legality/length rules.
+    bool platform_20261024{false};
 };
 
 // Resource model reconstructed from the published October 20 scoring notes.
@@ -33,7 +36,9 @@ public:
     const std::vector<uint32_t>& fixed_demands() const { return fixed_demand_; }
 
     // Sorted, unique cell-layer IDs covered by this net's actual pin shapes.
-    // Uses the same pin-layer policy as fixed demand; no whole-grid net masks.
+    // Historical profiles use the fixed-demand pin-layer policy. Platform
+    // macro-PIN credit retains only original shapes on the first geometry
+    // layer; IO credit retains every original layer. No whole-grid net masks.
     std::vector<int> pin_nodes(const Net& net) const;
 
     const GCellGrid& grid() const { return grid_; }

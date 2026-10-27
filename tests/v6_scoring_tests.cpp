@@ -134,6 +134,58 @@ void test_profiles(const fs::path& directory) {
     near(total.wirelength_score,official_wirelength_score(new_result.wirelength,1500,new_metrics),
          "aggregate and shared candidate wirelength helper agree");
 }
+
+void test_platform_resources(const fs::path& directory) {
+    std::string layers;
+    for(int l=1;l<=20;++l) {
+        const auto name=get_layer_name(l);
+        layers+="LAYER "+name+" TYPE ROUTING ; DIRECTION "+
+            (l%2?"HORIZONTAL":"VERTICAL")+" ; WIDTH 0.2 ; END "+name+"\n";
+    }
+    const std::string macro="MACRO block SIZE 300 BY 300 ; PIN p PORT "
+        "LAYER metal1 ; RECT 10 10 20 20 ; "
+        "LAYER metal2 ; RECT 210 210 220 220 ; END END p END block";
+    std::string input="UNITS DISTANCE MICRONS 1 ; DIEAREA ( 0 0 ) ( 300 300 ) ; "
+        "GCELLGRID X 0 DO 4 STEP 100 ; GCELLGRID Y 0 DO 4 STEP 100 ; ";
+    for(int l=1;l<=20;++l) input+="TRACKS "+std::string(l%2?"Y":"X")+
+        " 0 DO 31 STEP 10 LAYER "+get_layer_name(l)+" ; ";
+    input+="COMPONENTS 1 ; - u block + PLACED ( 0 0 ) N ; END COMPONENTS "
+        "PINS 0 ; END PINS NETS 1 ; - local ( u p ) ; END NETS END DESIGN";
+    LefParser lef;
+    DefParser def;
+    require(lef.parse(write(directory/"platform.lef",layers+macro)),"parse platform LEF");
+    require(def.parse(write(directory/"platform.def",input),lef,DefGridMapping::OFFICIAL_FULL),"parse platform DEF");
+    RoutingGraph historical(def,lef,{RoutingGeometryMode::GLOBAL_GUIDE,false,true});
+    RoutingGraph platform(def,lef,{RoutingGeometryMode::GLOBAL_GUIDE,false,true,true});
+    compat::Resources expected(def,lef,{true,false,true});
+    require(!historical.platform_resources()&&platform.platform_resources(),"resource contract is opt-in and observable");
+    require(std::string(platform.capacity_model()).find("20261024-platform")!=std::string::npos,
+            "capacity diagnostics identify platform contract");
+    for(int n=0;n<static_cast<int>(platform.size());++n) {
+        require(platform.official_capacity(n)==expected.capacity(n),"graph platform capacity agrees at every cell");
+        require(platform.official_obstacle_demand(n)==expected.fixed_demand(n),"graph platform fixed demand agrees at every cell");
+    }
+    const int projected=platform.node(2,2,1),physical=platform.node(2,2,2);
+    require(historical.official_obstacle_demand(projected)==2&&platform.official_obstacle_demand(projected)==1,
+            "platform fixed shape excludes its upper track without changing projection");
+    require(platform.official_obstacle_demand(physical)==0,"physical secondary-layer PIN does not add fixed demand there");
+    const auto& net=def.nets().front();
+    require(platform.own_pin_nodes(net)==std::vector<int>{platform.node(0,0,1)},
+            "graph excludes projected-only cells from own-PIN exemptions");
+    const std::vector<GuideRect> guides{{200,200,300,300,"metal1"}};
+    const auto options=metrics(true);
+    const auto old_result=measure_official_net_guides(net,guides,historical,lef,options,1000);
+    const auto new_result=measure_official_net_guides(net,guides,platform,lef,options,1000);
+    require(old_result.demand.empty(),"historical projected PIN credit is retained in old profile");
+    require(new_result.demand==std::vector<std::pair<int,int>>{{projected,1}},
+            "platform charges Guide demand at projected-only PIN cell");
+    near(old_result.wirelength,new_result.wirelength,"resource profile does not change geometric wirelength");
+    require(net.pins.front().port_rects.size()==2&&net.pins.front().port_rects.back().layer_idx==2,
+            "resource projection never rewrites physical PIN geometry");
+    rejects([&]{RoutingGraph invalid(def,lef,{RoutingGeometryMode::GLOBAL_GUIDE,false,false,true});},
+            "platform graph cannot silently use legacy scoring");
+}
+
 void test_plateau() {
     const auto old_options=metrics(false),new_options=metrics(true);
     for(const auto& [length,expected]:std::vector<std::pair<double,double>>{{0,100},{80,100},{100,100},{120,100.0/1.2}})
@@ -167,6 +219,7 @@ int main(int argc,char** argv) {
         const fs::path directory=argv[1];
         fs::create_directories(directory);
         test_profiles(directory);
+        test_platform_resources(directory);
         test_plateau();
         test_no_tracks(directory);
         std::cout<<"v6_scoring_tests: "<<checks<<" checks PASS\n";

@@ -82,6 +82,9 @@ std::string json_string(const std::string& s) {
 NegotiatedRouter::NegotiatedRouter(const DefParser& d,const LefParser& l,const ThermalParser& t,RouterOptions o)
     :def_(d),lef_(l),thermal_(t),options_(o),graph_(d,l,o.graph_options),policy_(d,l,graph_,o.tsv_policy),
      demand_(graph_.size()),guide_history_(graph_.size()) {
+    if(options_.v7_tsv && (!options_.official_model || !options_.official_metrics.score_20261020 ||
+       options_.tsv_policy.resource_mode!=TsvResourceMode::GLOBAL_GRID))
+        throw std::invalid_argument("V7 TSV refinement requires official 20261020 global-grid routing");
     if(options_.official_model) {
         for(size_t n=0;n<demand_.size();++n) {
             const auto cell=official_cell_contribution(graph_,int(n),0);
@@ -111,6 +114,25 @@ const std::vector<int>& NegotiatedRouter::cell_owners(int node) const {
     return found==cell_nets_.end()?empty:found->second;
 }
 bool NegotiatedRouter::timed_out() const { return std::chrono::steady_clock::now()>=deadline_; }
+bool NegotiatedRouter::v7_search_budget_available() const {
+    return v7_refinement_active_ && !timed_out() &&
+           counters_.expansions-v7_refinement_expansion_start_<options_.v7_rrr_astar_expansions &&
+           std::chrono::steady_clock::now()<v7_refinement_deadline_;
+}
+void NegotiatedRouter::verify_official_ledger(const CompleteMetrics& exact) {
+    if(!options_.official_model) return;
+    ++counters_.v7_ledger_checks;
+    auto near=[](long double a,long double b) {
+        return std::isfinite(a) && std::isfinite(b) &&
+               std::abs(a-b)<=1e-10L*std::max({1.0L,std::abs(a),std::abs(b)});
+    };
+    if(!near(official_wirelength_,exact.guide.wirelength) ||
+       !near(official_reference_,exact.guide.reference) ||
+       !near(official_squared_overflow_,exact.official.squared_normalized_overflow) ||
+       official_overflow_!=uint64_t(exact.guide.overflow) ||
+       official_zero_capacity_cells_!=exact.official.zero_capacity_cells)
+        throw std::logic_error("V7 incremental score ledger differs from complete measurement");
+}
 void NegotiatedRouter::check_v5_topology_budget() const {
     if(v5_topology_trial_ && timed_out()) throw std::runtime_error("SEARCH_LIMIT: V5 topology work budget exhausted");
 }
@@ -147,7 +169,7 @@ double NegotiatedRouter::edge_cost(int a,int b,const NetRoute& own) const {
     if(own.edges.count(key)) return 0;
     double result=graph_.edge_length(a,b)/graph_.ell0();
     if(graph_.layer(a)!=graph_.layer(b)) result+=options_.official_model?options_.official_metrics.via_cost_ratio:0.2;
-    if(recovery_cell_cost_) {
+    if(recovery_cell_cost_ || (options_.v7_cell_cost && options_.official_model)) {
         const auto& m=options_.official_metrics;
         result=own.nodes.count(b)?0:(lef_.get_layer_direction(get_layer_name(graph_.layer(b)))==Direction::HORIZONTAL?
             m.gcell_width_dbu:m.gcell_height_dbu)/graph_.ell0();
@@ -173,7 +195,8 @@ double NegotiatedRouter::edge_cost(int a,int b,const NetRoute& own) const {
 }
 double NegotiatedRouter::access_cost(const PinAccess& a,const NetRoute* own) const {
     double result=a.length/graph_.ell0()+(options_.official_model?options_.official_metrics.via_cost_ratio:0.2)*a.vias;
-    if(recovery_cell_cost_) result=options_.official_metrics.via_cost_ratio*a.vias*
+    const bool cell_cost=recovery_cell_cost_ || (options_.v7_cell_cost && options_.official_model);
+    if(cell_cost) result=options_.official_metrics.via_cost_ratio*a.vias*
         std::max(options_.official_metrics.gcell_width_dbu,options_.official_metrics.gcell_height_dbu)/graph_.ell0();
     std::set<int> touched;
     const auto& grid=graph_.grid();
@@ -183,7 +206,7 @@ double NegotiatedRouter::access_cost(const PinAccess& a,const NetRoute* own) con
         for(int r=r0;r<=r1;++r) for(int c=c0;c<=c1;++c) {
             int n=graph_.node(c,r,get_layer_index(g.layer));
             if(n>=0 && touched.insert(n).second) {
-                if(recovery_cell_cost_) result+=(lef_.get_layer_direction(g.layer)==Direction::HORIZONTAL?
+                if(cell_cost && !(options_.v7_cell_cost && own && own->nodes.count(n))) result+=(lef_.get_layer_direction(g.layer)==Direction::HORIZONTAL?
                     options_.official_metrics.gcell_width_dbu:options_.official_metrics.gcell_height_dbu)/graph_.ell0();
                 if(options_.official_metrics.score_20261020 && own && (own->nodes.count(n)||pin_exempt(own->net_index,n))) continue;
                 if(options_.official_model) {
@@ -510,7 +533,9 @@ PathResult NegotiatedRouter::search(const std::vector<PinAccess>& sources,const 
         return direct;
     }
     auto heuristic=[&](int n) {
-        if(dijkstra) return 0.0;
+        // Free existing-tree edges/cells invalidate a geometric lower bound.
+        // The bounded V7 refinement uses h=0; templates remain its incumbent.
+        if(dijkstra || v7_refinement_active_ || (options_.v7_cell_cost && options_.official_model)) return 0.0;
         if(recovery_cell_cost_) {
             const int steps=std::max({0,minc-graph_.col(n),graph_.col(n)-maxc})+
                 std::max({0,minr-graph_.row(n),graph_.row(n)-maxr});
@@ -544,7 +569,7 @@ PathResult NegotiatedRouter::search(const std::vector<PinAccess>& sources,const 
             if((k&255U)==0) check_v5_topology_budget();
             cost+=edge_cost(path[k-1],path[k],own);
             if(improve_fast && !own.edges.count(route_edge(path[k-1],path[k]))) {
-                if(recovery_cell_cost_) {
+                if(recovery_cell_cost_ || (options_.v7_cell_cost && options_.official_model)) {
                     const auto& m=options_.official_metrics;
                     base+=(own.nodes.count(path[k])?0:(lef_.get_layer_direction(get_layer_name(graph_.layer(path[k])))==Direction::HORIZONTAL?
                         m.gcell_width_dbu:m.gcell_height_dbu)/graph_.ell0())+
@@ -718,10 +743,12 @@ PathResult NegotiatedRouter::search(const std::vector<PinAccess>& sources,const 
             }
         }
     }
-    if(fast_search && incumbent.status==PathResult::Status::FOUND) {
+    if(fast_search && incumbent.status==PathResult::Status::FOUND && !v7_search_budget_available()) {
         if(incumbent_from_z) ++counters_.fast_z_paths;
+        if(v7_refinement_active_) ++counters_.v7_astar_fallbacks;
         ++counters_.fast_initial_paths;return incumbent;
     }
+    if(v7_refinement_active_) ++counters_.v7_astar_searches;
     size_t expanded=0;
     for(int margin=4;;margin*=2) {
         const int lc=std::max(0,minc-margin),hc=std::min(grid.cols-1,maxc+margin),
@@ -760,8 +787,15 @@ PathResult NegotiatedRouter::search(const std::vector<PinAccess>& sources,const 
             auto [f,cost,n]=todo.top();todo.pop(); (void)f;
             if(cost!=distance(n)) continue;
             if(f>incumbent.cost+1e-10) continue;
-            if(++expanded>options_.search_limit || ((expanded&255U)==0 && timed_out()))
+            if(++expanded>options_.search_limit || ((expanded&255U)==0 && timed_out()) ||
+               (v7_refinement_active_ && !v7_search_budget_available())) {
+                // Optional maze search never discards its valid template when
+                // its work budget expires. The batch still decides exact gain.
+                if(v7_refinement_active_ && incumbent.status==PathResult::Status::FOUND) {
+                    ++counters_.v7_astar_fallbacks;return incumbent;
+                }
                 return {PathResult::Status::SEARCH_LIMIT,{},0,0};
+            }
             ++counters_.expansions;
             if(targets.count(n)) {
                 PathResult result{PathResult::Status::FOUND,{},static_cast<size_t>(source_of(n)),cost};
@@ -1171,7 +1205,7 @@ double NegotiatedRouter::official_movable_priority(size_t index) const {
     return result;
 }
 void NegotiatedRouter::complete_zero_capacity_scope(std::vector<size_t>& scope) const {
-    const size_t limit=options_.rrr_score_aware && large_design()?options_.rrr_net_limit:128;
+    const size_t limit=v7_scope_limit_?v7_scope_limit_:(options_.rrr_score_aware && large_design()?options_.rrr_net_limit:128);
     if(!options_.official_model || scope.size()>=limit) return;
     const auto seeds=scope;
     std::set<size_t> included(scope.begin(),scope.end());
@@ -1276,6 +1310,29 @@ NetRoute NegotiatedRouter::build_route(size_t index,int slot) {
             else ++counters_.v5_topology_failures;
         }
       }
+    }
+    // Compare a shared pin-rooted tree with the TSV-rooted incumbent in both
+    // initial routing and later replacement passes. Final encoded W/C, with
+    // the same TSV occupancy, decides acceptance; the proxy only builds it.
+    if(best && options_.v7_topology && options_.official_model && slot>=0 &&
+       net.is_cross_die && has_shared_side && net.pins.size()<=32 && !timed_out()) {
+        const double remaining=std::min(120.0,0.05*options_.time_limit)-counters_.v7_topology_seconds;
+        if(remaining>0) {
+            ScopedTopologyBudget budget(deadline_,v5_topology_trial_,counters_.v7_topology_seconds,remaining);
+            ++counters_.v7_topology_attempted;
+            try {
+                auto trial=build_tree(index,slot,0,{{-1,-1}},-1,true);encode(index,trial);
+                ++counters_.v7_topology_candidates;
+                if(trial.measured.tsv_cells!=best->measured.tsv_cells)
+                    throw std::logic_error("V7 topology changed fixed TSV occupancy");
+                if(candidate_better(trial,*best)) {
+                    std::string error;
+                    if(!validate_route(index,trial.guides,error))
+                        throw std::runtime_error("V7 shared tree invalid Guide: "+error);
+                    check_v5_topology_budget();best=std::move(trial);++counters_.v7_topology_accepted;
+                }
+            } catch(const std::exception&) {++counters_.v7_topology_failures;}
+        }
     }
     if(best && options_.pin_local && slot<0 && !timed_out() && !(initial_build_&&large_design())) {
         for(auto& trial:pin_local_candidates(index)) {
@@ -1445,16 +1502,39 @@ bool NegotiatedRouter::repair_forest(size_t index,int slot,NetRoute& trial) {
 }
 bool NegotiatedRouter::rrr_round(const std::vector<size_t>& scope) {
     ++counters_.rrr_attempted;
-    const auto before=measure();std::vector<std::pair<size_t,NetRoute>> saved;
+    const bool incremental=options_.v7_rrr && options_.official_model;
+    const auto before=incremental?recovery_metrics(best_metrics_):measure();
+    std::vector<std::pair<size_t,NetRoute>> saved;
+    // Allocate and copy the rollback journal before touching a net's ledgers.
+    // A journal allocation failure after account(+1) must not double-account
+    // the old route or lose the only complete checkpoint.
+    saved.reserve(scope.size());
+    size_t maze_nets=0;
     auto rollback=[&] {
+        v7_refinement_active_=false;
         for(auto& [i,old]:saved) {account(i,routes_[i],-1);routes_[i]=std::move(old);account(i,routes_[i],1);}
+        saved.clear();best_metrics_=before;
         ++counters_.rollbacks;
+        if(incremental) ++counters_.v7_checkpoint_restores;
     };
     try {
         for(size_t i:scope) {
             if(timed_out()) {rollback();return false;}
-            const NetRoute old=routes_[i];account(i,old,-1);
+            const bool maze=incremental && maze_nets<options_.v7_rrr_astar_net_limit &&
+                options_.v7_rrr_astar_expansions>0 && options_.v7_rrr_astar_seconds>0 && official_movable_priority(i)>0;
+            v7_refinement_active_=maze;
+            if(maze) {
+                ++maze_nets;++counters_.v7_astar_nets;
+                v7_refinement_expansion_start_=counters_.expansions;
+                v7_refinement_deadline_=std::min(deadline_,std::chrono::steady_clock::now()+
+                    std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(options_.v7_rrr_astar_seconds)));
+            }
+            if(incremental) ++counters_.v7_rrr_nets;
+            saved.emplace_back(i,routes_.at(i));
+            const NetRoute& old=saved.back().second;
+            bool removed=false,inserted=false;
             try {
+                account(i,old,-1);removed=true;
                 NetRoute trial;
                 routes_[i]=NetRoute{};
                 bool repaired=false;
@@ -1474,18 +1554,41 @@ bool NegotiatedRouter::rrr_round(const std::vector<size_t>& scope) {
                     const auto base=official_candidate_base();
                     if(official_candidate_key(full,base)<official_candidate_key(trial,base)) trial=std::move(full);
                 } else if(candidate_key(full)<candidate_key(trial)) trial=std::move(full);
-                // Transaction permits one net to get worse so later nets can benefit.
-                routes_[i]=std::move(trial);account(i,routes_[i],1);saved.emplace_back(i,old);
-            } catch(const std::exception& e) {++rejection_reasons_[e.what()];routes_[i]=old;account(i,old,1);}
+                // Keep group negotiation: an individual move may lose score.
+                // Fixed-slot RRR must preserve T before using the W/C ledger.
+                if(incremental && trial.measured.tsv_cells!=old.measured.tsv_cells)
+                    throw std::logic_error("V7 fixed-slot RRR changed thermal TSV cells");
+                routes_[i]=std::move(trial);account(i,routes_[i],1);inserted=true;
+            } catch(const std::exception& e) {
+                if(inserted) account(i,routes_[i],-1);
+                if(removed) {routes_[i]=std::move(saved.back().second);account(i,routes_[i],1);}
+                saved.pop_back();
+                ++rejection_reasons_[e.what()];
+            }
+            v7_refinement_active_=false;
         }
-        validate_complete();auto after=measure();
-        if(better(after,before)) {best_metrics_=after;++counters_.rrr_accepted;return true;}
+        auto after=incremental?recovery_metrics(before):measure();
+        if(incremental) for(const auto& [i,old]:saved) {
+            after.physical_length+=routes_[i].length-old.length;
+            after.vias=after.vias-old.vias+routes_[i].vias;
+        }
+        if(!incremental || better(after,before)) {
+            const auto started=std::chrono::steady_clock::now();
+            validate_complete();after=measure();
+            if(incremental) {
+                verify_official_ledger(after);
+                counters_.v7_validation_seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
+            }
+            if(better(after,before)) {best_metrics_=after;++counters_.rrr_accepted;return true;}
+        }
         ++rejection_reasons_["RRR round did not improve the complete comparison key"];
         rollback();return false;
     } catch(...) {rollback();throw;}
 }
 void NegotiatedRouter::run_rrr(int rounds) {
+    const auto started=std::chrono::steady_clock::now();
     int stale=0,polish=0;
+    const bool v7=options_.v7_rrr && options_.official_model;
     const bool score_aware=options_.official_model && options_.rrr_score_aware;
     for(int round=0;round<rounds&&!timed_out();++round) {
         std::vector<double> priority(routes_.size());bool overflow=false;
@@ -1544,15 +1647,29 @@ void NegotiatedRouter::run_rrr(int rounds) {
             return def_.nets()[a].name<def_.nets()[b].name;
         });
         scope.resize(std::min(scope.size(),std::max<size_t>(1,size_t(std::ceil(routes_.size()*(overflow?0.2:0.05))))));
-        const size_t limit=score_aware?options_.rrr_net_limit:128;
-        if(large_design() && scope.size()>limit) scope.resize(limit);
+        size_t limit=score_aware?options_.rrr_net_limit:128;
+        if(v7) {
+            const size_t ceiling=std::max<size_t>(1,options_.v7_rrr_net_limit);
+            const size_t growth=size_t(std::min(round+1,8));
+            limit=std::min(ceiling,std::max<size_t>(1,limit)*growth);
+        }
+        if((large_design() || v7) && scope.size()>limit) scope.resize(limit);
+        v7_scope_limit_=v7?limit:0;
         complete_zero_capacity_scope(scope);
+        if(v7) counters_.v7_rrr_peak_scope=std::max(counters_.v7_rrr_peak_scope,scope.size());
         if(scope.empty()) break;
         bool accepted=rrr_round(scope);
         std::cout<<"[RRR] round="<<round+1<<" accepted="<<accepted<<" guide_overflow="<<best_metrics_.guide.overflow
                  <<" physical_overflow="<<best_metrics_.physical_overflow<<"\n";
         stale=accepted?0:stale+1;if(stale>=3) break;
         if(overflow) present_=std::min(64.0,present_*1.5);
+    }
+    v7_scope_limit_=0;v7_refinement_active_=false;
+    if(v7) {
+        const auto validation_started=std::chrono::steady_clock::now();
+        validate_complete();best_metrics_=measure();verify_official_ledger(best_metrics_);
+        counters_.v7_validation_seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-validation_started).count();
+        counters_.v7_rrr_seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
     }
 }
 void NegotiatedRouter::optimize_tsv() {
@@ -1625,6 +1742,101 @@ void NegotiatedRouter::optimize_tsv() {
         stale=accepted?0:stale+1;if(stale>=2) break;
     }
 }
+void NegotiatedRouter::optimize_v7_tsv() {
+    if(!options_.v7_tsv || options_.tsv_rounds<=0 || timed_out()) return;
+    const auto baseline=measure();
+    std::map<size_t,NetRoute> journal;
+    try {
+        {
+            ScopedTopologyBudget budget(deadline_,v5_topology_trial_,counters_.v7_tsv_seconds,options_.v7_tsv_seconds);
+            std::vector<int> assignment;assignment.reserve(routes_.size());
+            for(const auto& route:routes_) assignment.push_back(route.slot);
+            TsvMoveSearch proposals(def_,graph_,policy_,thermal_,assignment);
+            if(std::abs(proposals.current_correlation()-baseline.guide.correlation)>1e-9)
+                throw std::logic_error("V7 TSV proposal occupancy differs from encoded Guide");
+            std::vector<size_t> scope;
+            for(size_t i=0;i<routes_.size();++i)
+                if(routes_[i].slot>=0 && def_.nets()[i].pins.size()<=128) scope.push_back(i);
+            std::stable_sort(scope.begin(),scope.end(),[&](size_t a,size_t b) {
+                const double x=routes_[a].measured.wirelength-routes_[a].measured.reference;
+                const double y=routes_[b].measured.wirelength-routes_[b].measured.reference;
+                return x!=y?x>y:def_.nets()[a].name<def_.nets()[b].name;
+            });
+            if(scope.size()>options_.v7_tsv_nets) scope.resize(options_.v7_tsv_nets);
+            for(int pass=0;pass<options_.tsv_rounds && !timed_out();++pass) {
+                size_t accepted=0;
+                for(size_t i:scope) {
+                    if(timed_out()) break;
+                    const auto before=recovery_metrics(best_metrics_);
+                    TsvMoveSearchOptions settings;
+                    settings.max_candidates=options_.v7_tsv_candidates;
+                    settings.thermal_gain=options_.official_metrics.thermal_gain;
+                    settings.length_price=before.guide.wirelength>before.guide.reference?
+                        45.0*before.guide.reference/(before.guide.wirelength*before.guide.wirelength):0.0;
+                    const auto candidates=proposals.candidates(i,settings);
+                    counters_.v7_tsv_candidates+=candidates.size();
+                    for(const auto& candidate:candidates) {
+                        if(timed_out()) break;
+                        ++counters_.v7_tsv_attempted;
+                        NetRoute old=routes_[i];
+                        bool removed=false,inserted=false;
+                        auto restore=[&] {
+                            if(inserted) account(i,routes_[i],-1);
+                            if(removed) {routes_[i]=std::move(old);account(i,routes_[i],1);}
+                            removed=inserted=false;
+                            ++counters_.v7_tsv_rollbacks;
+                        };
+                        try {
+                            account(i,old,-1);removed=true;routes_[i]=NetRoute{};
+                            auto trial=build_route(i,candidate.slot);
+                            if(trial.measured.tsv_cells.size()!=1)
+                                throw std::logic_error("V7 TSV trial must have one encoded landing");
+                            routes_[i]=std::move(trial);account(i,routes_[i],1);inserted=true;
+                            auto after=recovery_metrics(before);
+                            after.physical_length+=routes_[i].length-old.length;
+                            after.vias=after.vias-old.vias+routes_[i].vias;
+                            after.guide.correlation=candidate.correlation_after;
+                            after.official.thermal_score=50.0*(1+std::tanh(options_.official_metrics.thermal_gain*after.guide.correlation));
+                            after.guide.quality=(.45*after.official.wirelength_score+.30*after.official.congestion_score+.25*after.official.thermal_score)/100.0;
+                            after.official.guide=after.guide;
+                            if(!timed_out() && better(after,before)) {
+                                // Save the stage's original only once, before its first accepted move.
+                                journal.try_emplace(i,old);
+                                if(!proposals.commit_move(i,candidate.slot))
+                                    throw std::logic_error("V7 TSV occupancy commit rejected");
+                                removed=inserted=false;best_metrics_=after;
+                                ++accepted;++counters_.v7_tsv_accepted;break;
+                            }
+                            restore();
+                        } catch(const std::exception& e) {
+                            restore();++counters_.v7_tsv_failures;
+                            ++rejection_reasons_[std::string("V7 TSV trial: ")+e.what()];
+                        }
+                    }
+                }
+                std::cout<<"[V7 TSV] pass="<<pass+1<<" accepted="<<accepted
+                         <<" quality="<<best_metrics_.guide.quality*100<<"\n";
+                if(!accepted) break;
+            }
+            if(timed_out()) ++counters_.v7_tsv_budget_stops;
+        }
+        validate_complete();const auto exact=measure();verify_official_ledger(exact);
+        if(std::abs(exact.guide.correlation-best_metrics_.guide.correlation)>1e-9 ||
+           std::abs(exact.guide.quality-best_metrics_.guide.quality)>1e-9 ||
+           exact.guide.quality+1e-10<baseline.guide.quality)
+            throw std::logic_error("V7 TSV incremental thermal/quality checkpoint mismatch");
+        best_metrics_=exact;
+    } catch(const std::exception& e) {
+        // A proposal/context/verification failure restores the whole phase.
+        for(auto& [i,old]:journal) {account(i,routes_[i],-1);routes_[i]=std::move(old);account(i,routes_[i],1);}
+        ++counters_.v7_checkpoint_restores;
+        ++rejection_reasons_[std::string("V7 TSV phase restored: ")+e.what()];
+        validate_complete();best_metrics_=measure();verify_official_ledger(best_metrics_);
+        if(std::abs(best_metrics_.guide.quality-baseline.guide.quality)>1e-9)
+            throw std::logic_error("V7 TSV rollback did not restore phase baseline");
+    }
+}
+
 void NegotiatedRouter::validate_complete() const {
     if(complete_validation_cached_ && validated_generation_==state_generation_) {
         ++complete_validation_cache_hits_;
@@ -1728,11 +1940,21 @@ bool NegotiatedRouter::route_all() {
         validate_complete();initial_metrics_=best_metrics_=measure();complete_=true;
         std::cout<<"[INITIAL] nets="<<routes_.size()<<" slots="<<policy_.slots().size()<<" guide_overflow="<<best_metrics_.guide.overflow
                  <<" physical_overflow="<<best_metrics_.physical_overflow<<"\n";
-        run_rrr(large_design()?std::min(3,options_.rrr_rounds):options_.rrr_rounds);
+        if(options_.v7_rrr && options_.official_model) {
+            try { run_rrr(options_.rrr_rounds); }
+            catch(const std::exception& e) {
+                // rrr_round rolls its entire journal back before throwing.
+                // Export only after the restored checkpoint verifies exactly.
+                v7_refinement_active_=false;v7_scope_limit_=0;
+                ++rejection_reasons_[std::string("V7 optional RRR stopped: ")+e.what()];
+                validate_complete();best_metrics_=measure();verify_official_ledger(best_metrics_);
+            }
+        } else run_rrr(large_design()?std::min(3,options_.rrr_rounds):options_.rrr_rounds);
         // Global-grid supply can contain millions of cells even with few nets.
         // Its bounded spatial assignment/polish replaces this exhaustive
         // legacy net x reservation proposal enumeration.
         if(!large_design() && options_.tsv_policy.resource_mode!=TsvResourceMode::GLOBAL_GRID) optimize_tsv();
+        if(options_.v7_tsv) optimize_v7_tsv();
         pre_recovery_metrics_=measure();
         if(!large_design()) recover_wirelength();
         if(options_.large_recovery) recover_budgeted_wirelength();
@@ -1797,6 +2019,8 @@ bool NegotiatedRouter::export_stats(const std::string& path) const {
         };
         out<<"{\n\"scoring_model\":"<<json_string(options_.official_metrics.score_20261020?"compat-20261020":options_.official_model?"official-2026":"legacy-proxy")<<",\n\"geometry_model\":"<<json_string(graph_.capacity_model())<<",\n\"guide_encoding\":"<<json_string(options_.official_model?"global-gcell-regions":large_design()?"width-corridors-and-via-enclosures":"legacy-gcell-envelopes")
            <<",\n\"guide_encoding_contract\":"<<json_string(options_.official_model && options_.tsv_policy.resource_mode==TsvResourceMode::GLOBAL_GRID?"grid-native-20261024":"historical")
+           <<",\n\"resource_profile\":"<<json_string(!graph_.global_guide_mode()?"physical":options_.official_model && options_.official_metrics.score_20261020?
+                (graph_.platform_resources()?"platform-20261024":"20261020"):"legacy-20261011")
            <<",\n\"official_scorer_run\":false,\n\"score_evidence\":\"local-model-only\""
            <<",\n\"large_design_schedule\":"<<(large_design()?"true":"false")
            <<",\n\"input_mapping\":{\"thermal\":"<<json_string(thermal_.mapping_mode())
@@ -1869,6 +2093,27 @@ bool NegotiatedRouter::export_stats(const std::string& path) const {
            <<",\"fast_z_candidates\":"<<counters_.fast_z_candidates
            <<",\"fast_z_paths\":"<<counters_.fast_z_paths
            <<",\"fast_layer_prunes\":"<<counters_.fast_layer_prunes
+           <<",\"v7_topology_attempted\":"<<counters_.v7_topology_attempted
+           <<",\"v7_topology_candidates\":"<<counters_.v7_topology_candidates
+           <<",\"v7_topology_accepted\":"<<counters_.v7_topology_accepted
+           <<",\"v7_topology_failures\":"<<counters_.v7_topology_failures
+           <<",\"v7_topology_seconds\":"<<counters_.v7_topology_seconds
+           <<",\"v7_rrr_nets\":"<<counters_.v7_rrr_nets
+           <<",\"v7_astar_nets\":"<<counters_.v7_astar_nets
+           <<",\"v7_astar_searches\":"<<counters_.v7_astar_searches
+           <<",\"v7_astar_fallbacks\":"<<counters_.v7_astar_fallbacks
+           <<",\"v7_ledger_checks\":"<<counters_.v7_ledger_checks
+           <<",\"v7_checkpoint_restores\":"<<counters_.v7_checkpoint_restores
+           <<",\"v7_rrr_peak_scope\":"<<counters_.v7_rrr_peak_scope
+           <<",\"v7_rrr_seconds\":"<<counters_.v7_rrr_seconds
+           <<",\"v7_validation_seconds\":"<<counters_.v7_validation_seconds
+           <<",\"v7_tsv_candidates\":"<<counters_.v7_tsv_candidates
+           <<",\"v7_tsv_attempted\":"<<counters_.v7_tsv_attempted
+           <<",\"v7_tsv_accepted\":"<<counters_.v7_tsv_accepted
+           <<",\"v7_tsv_rollbacks\":"<<counters_.v7_tsv_rollbacks
+           <<",\"v7_tsv_failures\":"<<counters_.v7_tsv_failures
+           <<",\"v7_tsv_budget_stops\":"<<counters_.v7_tsv_budget_stops
+           <<",\"v7_tsv_seconds\":"<<counters_.v7_tsv_seconds
            <<",\"v5_topology_attempted\":"<<counters_.v5_topology_attempted
            <<",\"v5_topology_candidates\":"<<counters_.v5_topology_candidates
            <<",\"v5_topology_accepted\":"<<counters_.v5_topology_accepted
@@ -1891,6 +2136,17 @@ bool NegotiatedRouter::export_stats(const std::string& path) const {
         out<<"},\n\"options\":{\"rrr_rounds\":"<<options_.rrr_rounds<<",\"tsv_rounds\":"<<options_.tsv_rounds
            <<",\"rrr_score_aware\":"<<(options_.rrr_score_aware?"true":"false")
            <<",\"rrr_net_limit\":"<<options_.rrr_net_limit
+           <<",\"v7_rrr\":"<<(options_.v7_rrr?"true":"false")
+           <<",\"v7_rrr_net_limit\":"<<options_.v7_rrr_net_limit
+           <<",\"v7_rrr_astar_net_limit\":"<<options_.v7_rrr_astar_net_limit
+           <<",\"v7_rrr_astar_expansions\":"<<options_.v7_rrr_astar_expansions
+           <<",\"v7_rrr_astar_seconds\":"<<options_.v7_rrr_astar_seconds
+           <<",\"v7_topology\":"<<(options_.v7_topology?"true":"false")
+           <<",\"v7_cell_cost\":"<<(options_.v7_cell_cost?"true":"false")
+           <<",\"v7_tsv\":"<<(options_.v7_tsv?"true":"false")
+           <<",\"v7_tsv_nets\":"<<options_.v7_tsv_nets
+           <<",\"v7_tsv_candidates\":"<<options_.v7_tsv_candidates
+           <<",\"v7_tsv_seconds\":"<<options_.v7_tsv_seconds
            <<",\"official_score_pricing\":"<<(options_.official_score_pricing?"true":"false")
            <<",\"congestion_price_updates\":"<<pricing_updates_
            <<",\"congestion_price_min\":"<<(pricing_updates_?congestion_price_min_:1)

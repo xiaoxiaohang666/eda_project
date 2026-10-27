@@ -1134,4 +1134,176 @@ bool TsvPolicy::validate_mapping(const Net& net,const std::vector<GuideRect>& gu
             "inferred thermal TSV cell differs from the planned physical TSV cell");
     return true;
 }
+
+struct TsvMoveSearch::Impl {
+    const DefParser& def;
+    const RoutingGraph& graph;
+    const TsvPolicy& policy;
+    std::vector<int> assignment, owner, slot_cells;
+    std::vector<double> normalized_heat;
+    std::unique_ptr<PearsonState> pearson;
+    std::unique_ptr<SlotPointIndex> free_index;
+    double correlation_per_normalized_heat{0.0};
+
+    Impl(const DefParser& d,const RoutingGraph& g,const TsvPolicy& p,
+         const ThermalParser& thermal,const std::vector<int>& chosen)
+        :def(d),graph(g),policy(p),assignment(chosen),owner(p.slots().size(),-1),
+         slot_cells(p.slots().size(),-1),normalized_heat(p.slots().size(),0.0) {
+        if (std::string(policy.pairing_mode())!="global-grid")
+            throw std::invalid_argument("TSV move search requires global-grid resources");
+        if (assignment.size()!=def.nets().size())
+            throw std::invalid_argument("TSV move search assignment size mismatch");
+        const auto& grid=graph.grid();
+        const size_t cells=size_t(grid.cols)*grid.rows;
+        std::vector<double> heat(cells);
+        std::vector<int> counts(cells,0);
+        long double sum=0,square=0;
+        double minimum=std::numeric_limits<double>::infinity(),maximum=0;
+        for (int row=0;row<grid.rows;++row) for (int col=0;col<grid.cols;++col) {
+            const double excess=thermal.get_temperature(col,row)-thermal.ambient_temperature();
+            if (!std::isfinite(excess)) throw std::invalid_argument("nonfinite TSV move heat");
+            const double h=std::max(0.0,excess);
+            heat[size_t(row)*grid.cols+col]=h;sum+=h;square+=static_cast<long double>(h)*h;
+            minimum=std::min(minimum,h);maximum=std::max(maximum,h);
+        }
+        const auto& slots=policy.slots();
+        for (size_t id=0;id<slots.size();++id) {
+            const int col=grid.get_col(slots[id].point.x),row=grid.get_row(slots[id].point.y);
+            if (col<0||row<0||col>=grid.cols||row>=grid.rows)
+                throw std::logic_error("TSV move slot outside thermal grid");
+            slot_cells[id]=row*grid.cols+col;
+            normalized_heat[id]=maximum>minimum?(heat[size_t(slot_cells[id])]-minimum)/(maximum-minimum):0;
+        }
+        size_t occupied=0;
+        for (size_t n=0;n<assignment.size();++n) {
+            const int id=assignment[n];const auto& net=def.nets()[n];
+            if (!net.is_cross_die) {
+                if (id!=-1) throw std::invalid_argument("same-die net owns a TSV move slot");
+                continue;
+            }
+            if (!policy.compatible(net,id)||owner[size_t(id)]!=-1)
+                throw std::invalid_argument("invalid or duplicate TSV move assignment");
+            const size_t cell=size_t(slot_cells[size_t(id)]);
+            if (counts[cell]) throw std::invalid_argument("TSV move requires binary thermal occupancy");
+            owner[size_t(id)]=int(n);++counts[cell];++occupied;
+        }
+        // Pearson's binary-occupancy denominator remains fixed after a move.
+        const long double variance=std::max(0.0L,square-sum*sum/static_cast<long double>(cells));
+        const long double count_variance=static_cast<long double>(occupied)*
+            (1.0L-static_cast<long double>(occupied)/static_cast<long double>(cells));
+        const long double denominator=std::sqrt(variance*count_variance);
+        if (denominator>0) correlation_per_normalized_heat=double((maximum-minimum)/denominator);
+        pearson=std::make_unique<PearsonState>(std::move(heat),std::move(counts));
+        // GLOBAL_GRID slots are all enabled; remove occupied points after tree
+        // construction so commit_move can restore their nodes without rebuilding.
+        free_index=std::make_unique<SlotPointIndex>(slots,std::vector<bool>(slots.size(),true),&normalized_heat);
+        for (int id:assignment) if (id>=0) free_index->remove(id);
+    }
+
+    double risk(int slot) const {
+        const auto& s=policy.slots()[size_t(slot)];
+        return 0.5/std::max(1.0,graph.guide_capacity(s.lower_node))+
+               0.5/std::max(1.0,graph.guide_capacity(s.upper_node));
+    }
+};
+
+TsvMoveSearch::TsvMoveSearch(const DefParser& def,const RoutingGraph& graph,const TsvPolicy& policy,
+                           const ThermalParser& thermal,const std::vector<int>& assignment)
+    :impl_(std::make_unique<Impl>(def,graph,policy,thermal,assignment)) {}
+TsvMoveSearch::~TsvMoveSearch()=default;
+
+double TsvMoveSearch::current_correlation() const {return impl_->pearson->correlation();}
+int TsvMoveSearch::current_slot(size_t net_index) const {return impl_->assignment.at(net_index);}
+
+std::vector<TsvMoveCandidate> TsvMoveSearch::candidates(size_t net_index,const TsvMoveSearchOptions& o) const {
+    if (o.max_candidates>4096 || !std::isfinite(o.length_price)||o.length_price<0 ||
+        !std::isfinite(o.thermal_gain)||o.thermal_gain<0 || !std::isfinite(o.risk_price)||o.risk_price<0)
+        throw std::invalid_argument("invalid TSV move proposal budget or score price");
+    const auto& state=*impl_;const auto& net=state.def.nets().at(net_index);
+    const int old=state.assignment.at(net_index);
+    if (!o.max_candidates||!net.is_cross_die||old<0||net.pins.size()>o.max_pins) return {};
+    // Six spatial/thermal queries may each contribute a full shortlist. Bound
+    // quadratic MST work before collecting that union, including the old slot.
+    // This also remains bounded if a caller raises max_pins above its default.
+    constexpr size_t mst_work_limit=2000000,queries_per_net=6;
+    const size_t terminals=net.pins.size()+2;
+    if (terminals>mst_work_limit/terminals) return {};
+    const size_t evaluations=mst_work_limit/(terminals*terminals);
+    const size_t query_count=std::min(o.max_candidates,(evaluations-1)/queries_per_net);
+    if (!query_count) return {};
+    const auto& slots=state.policy.slots();
+    std::vector<Point> anchors{slots[size_t(old)].point};
+    const auto add_anchor=[&](Point point) {
+        for (const auto existing:anchors) if (existing.distance_to(point)==0) return;
+        anchors.push_back(point);
+    };
+    add_anchor(pin_median_anchor(net));
+    // Both side medians permit shorter wiring moves as well as hotter moves.
+    for (bool top:{false,true}) {
+        std::vector<double> xs,ys;
+        for (const auto& pin:net.pins) if ((pin.layer_idx>=11)==top) {xs.push_back(pin.coord.x);ys.push_back(pin.coord.y);}
+        if (xs.empty()) continue;
+        std::sort(xs.begin(),xs.end());std::sort(ys.begin(),ys.end());
+        add_anchor({(xs[(xs.size()-1)/2]+xs[xs.size()/2])*0.5,
+                    (ys[(ys.size()-1)/2]+ys[ys.size()/2])*0.5});
+    }
+    std::set<int> pool;
+    for (const auto point:anchors) {
+        const auto ids=state.free_index->nearest(point,query_count);
+        pool.insert(ids.begin(),ids.end());
+    }
+    const double before=state.pearson->correlation();
+    const double tanh_before=std::tanh(o.thermal_gain*before);
+    double heat_price=12.5*o.thermal_gain*(1-tanh_before*tanh_before)*state.correlation_per_normalized_heat;
+    // A saturated tanh has a zero floating-point local derivative, although a
+    // finite move towards hotter cells can still improve the exact score. Use
+    // a secant to the hottest possible target as an additional retrieval price.
+    const double heat_step=1-state.normalized_heat[size_t(old)];
+    if (heat_step>0) {
+        const double hottest_correlation=std::clamp(before+heat_step*state.correlation_per_normalized_heat,-1.0,1.0);
+        heat_price=std::max(heat_price,12.5*(std::tanh(o.thermal_gain*hottest_correlation)-tanh_before)/heat_step);
+    }
+    if (heat_price>0) {
+        const auto& die=state.graph.die_area();
+        const double max_weight=4*std::max(1.0,die.width()+die.height());
+        const double heat_weight=o.length_price>0?std::min(max_weight,heat_price/o.length_price):max_weight;
+        for (size_t a=0;a<std::min<size_t>(2,anchors.size());++a) {
+            const auto ids=state.free_index->nearest_thermal(anchors[a],query_count,heat_weight);
+            pool.insert(ids.begin(),ids.end());
+        }
+    }
+    const double via_penalty=0.2*state.graph.ell0();
+    const auto length=[&](int id) {
+        return terminal_mst(net,slots[size_t(id)],false,via_penalty)+terminal_mst(net,slots[size_t(id)],true,via_penalty);
+    };
+    const double old_length=length(old),old_risk=state.risk(old);
+    std::vector<TsvMoveCandidate> result;result.reserve(pool.size());
+    for (int id:pool) {
+        if (id==old||state.owner[size_t(id)]!=-1||!state.policy.compatible(net,id)) continue;
+        const double after=state.pearson->correlation_after_move(size_t(state.slot_cells[size_t(old)]),size_t(state.slot_cells[size_t(id)]));
+        const double delta_length=length(id)-old_length;
+        const double delta_thermal=12.5*(std::tanh(o.thermal_gain*after)-tanh_before);
+        result.push_back({id,after,delta_length,delta_thermal,
+                          delta_thermal-o.length_price*delta_length-o.risk_price*(state.risk(id)-old_risk)});
+    }
+    std::sort(result.begin(),result.end(),[](const auto& a,const auto& b) {
+        if (a.estimated_score_delta!=b.estimated_score_delta) return a.estimated_score_delta>b.estimated_score_delta;
+        if (a.proxy_length_delta_dbu!=b.proxy_length_delta_dbu) return a.proxy_length_delta_dbu<b.proxy_length_delta_dbu;
+        return a.slot<b.slot;
+    });
+    if (result.size()>o.max_candidates) result.resize(o.max_candidates);
+    return result;
+}
+
+bool TsvMoveSearch::commit_move(size_t net_index,int new_slot) {
+    auto& state=*impl_;
+    if (net_index>=state.assignment.size()||new_slot<0||new_slot>=int(state.owner.size())) return false;
+    const int old=state.assignment[net_index];
+    if (old<0||old==new_slot||state.owner[size_t(new_slot)]!=-1||
+        !state.policy.compatible(state.def.nets()[net_index],new_slot)) return false;
+    state.pearson->move(state.slot_cells[size_t(old)],state.slot_cells[size_t(new_slot)]);
+    state.free_index->remove(new_slot);state.free_index->restore(old);
+    state.owner[size_t(new_slot)]=int(net_index);state.owner[size_t(old)]=-1;
+    state.assignment[net_index]=new_slot;return true;
+}
 } // namespace eda

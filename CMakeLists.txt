@@ -255,3 +255,25 @@ if(BUILD_TESTING)
     add_test(NAME global_tsv COMMAND global_tsv_tests
         "${CMAKE_CURRENT_BINARY_DIR}/global-tsv-artifacts")
 endif()
+
+# V7 refinement regressions use the same immutable local FLUTE runtime.
+if(BUILD_TESTING)
+    add_test(NAME v7_cli COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_v7_cli.py" "$<TARGET_FILE:eda_router>"
+        "$<TARGET_FILE:eda_score_compat>" "$<TARGET_FILE:eda_validate_guide>"
+        "${CMAKE_CURRENT_SOURCE_DIR}/output/runtime/official-flute")
+endif()
+
+if(BUILD_TESTING)
+    add_executable(v7_tsv_tests tests/v7_tsv_tests.cpp)
+    target_link_libraries(v7_tsv_tests PRIVATE eda_core)
+    add_test(NAME v7_tsv COMMAND v7_tsv_tests "${CMAKE_CURRENT_BINARY_DIR}/v7-tsv-artifacts")
+endif()
+
+if(BUILD_TESTING)
+    add_executable(v7_router_tests tests/v7_router_tests.cpp)
+    target_link_libraries(v7_router_tests PRIVATE eda_core)
+    add_test(NAME v7_router COMMAND v7_router_tests
+        "${CMAKE_CURRENT_BINARY_DIR}/v7-router-artifacts"
+        "${CMAKE_CURRENT_SOURCE_DIR}/output/runtime/official-flute")
+endif()

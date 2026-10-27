@@ -1,6 +1,7 @@
 #pragma once
 #include "router/routing_graph.hpp"
 #include "parser/thermal_parser.hpp"
+#include <memory>
 
 namespace eda {
 enum class TsvResourceMode { AUTO, PAIRED, PROJECTED, GLOBAL_GRID };
@@ -126,5 +127,42 @@ private:
                                 const std::vector<Point>& anchors, std::vector<int>& chosen) const;
     std::vector<int> assign_projected(const std::vector<Net>& nets,
                                      const ThermalParser& thermal) const;
+};
+
+// Bounded, deterministic proposals for post-route joint TSV/routing trials.
+// Scores use 0..100 weighted quality units; this is only a shortlist proxy.
+struct TsvMoveSearchOptions {
+    // Upper bounds; an internal quadratic-work cap can shorten/skip queries.
+    size_t max_candidates{16}, max_pins{128};
+    double length_price{0.0}; // Positive weighted-quality cost per DBU.
+    double thermal_gain{20.0}, risk_price{0.0};
+};
+struct TsvMoveCandidate {
+    int slot{-1};
+    double correlation_after{};
+    double proxy_length_delta_dbu{};
+    double thermal_score_delta{}; // Exact 0.25 * delta(T), in quality points.
+    double estimated_score_delta{};
+};
+class TsvMoveSearch {
+public:
+    // All referenced design objects must outlive this context. The assignment
+    // is copied, includes all net indices, and must contain one unique slot per
+    // cross-die net and -1 for each same-die net. GLOBAL_GRID only.
+    TsvMoveSearch(const DefParser&, const RoutingGraph&, const TsvPolicy&,
+                  const ThermalParser&, const std::vector<int>& assignment);
+    ~TsvMoveSearch();
+    TsvMoveSearch(const TsvMoveSearch&) = delete;
+    TsvMoveSearch& operator=(const TsvMoveSearch&) = delete;
+    std::vector<TsvMoveCandidate> candidates(size_t net_index,
+                                            const TsvMoveSearchOptions& options = {}) const;
+    double current_correlation() const;
+    int current_slot(size_t net_index) const;
+    // Call only after a fully routed, encoded, validated move is accepted.
+    // An invalid/occupied destination leaves every context field unchanged.
+    bool commit_move(size_t net_index, int new_slot);
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
 };
 } // namespace eda

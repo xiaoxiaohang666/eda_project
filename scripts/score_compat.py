@@ -55,7 +55,7 @@ def main(argv: list[str] | None = None) -> int:
     provenance.add_argument("--official-runtime", type=Path, default=DEFAULT_RUNTIME)
     # Consume all value options even when they precede GUIDE; otherwise
     # parse_known_args can mistake an unknown option's value for the filename.
-    for option in ("--profile", "--zero-capacity-penalty", "--pin-layer-policy",
+    for option in ("--profile", "--zero-capacity-penalty", "--pin-layer-policy", "--resource-profile",
                    "--deduplicate-tracks", "--thermal-gain", "--tsv-cost-ratio",
                    "--via-cost-ratio", "--tsv-congestion-ratio",
                    "--router-runtime-seconds", "--router-peak-memory-bytes"):

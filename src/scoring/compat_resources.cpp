@@ -52,6 +52,8 @@ uint32_t checked_count(size_t count) {
 
 Resources::Resources(const DefParser& def, const LefParser& lef, ResourceOptions options)
     : grid_(def.gcell_grid()), options_(options) {
+    if (options_.platform_20261024 && (!options_.pin_first_layer || options_.deduplicate_tracks))
+        throw std::runtime_error("platform resources require first-layer macro PIN projection and repeated tracks");
     if (!grid_.valid() || !std::isfinite(def.dbu_per_micron()) || def.dbu_per_micron() <= 0)
         throw std::runtime_error("compatibility resources require a valid DEF grid and units");
     plane_ = static_cast<size_t>(grid_.cols) * static_cast<size_t>(grid_.rows);
@@ -113,7 +115,8 @@ Resources::Resources(const DefParser& def, const LefParser& lef, ResourceOptions
         for (const auto& [pin_name, pin] : macro->pins) {
             (void)pin_name;
             for (const auto& shape : pin.port_rects) {
-                const int l = get_layer_index(options_.pin_first_layer ? pin.layer : shape.layer);
+                const auto& first_layer = options_.platform_20261024 ? pin.port_rects.front().layer : pin.layer;
+                const int l = get_layer_index(options_.pin_first_layer ? first_layer : shape.layer);
                 if (l) occupied[l].push_back(
                     transform_macro_rect(shape.rect, *macro, component, def.dbu_per_micron()));
             }
@@ -123,7 +126,8 @@ Resources::Resources(const DefParser& def, const LefParser& lef, ResourceOptions
     for (const auto& [name, pin] : def.io_pins()) {
         (void)name;
         for (const auto& shape : pin.port_rects) {
-            const int l = options_.pin_first_layer ? pin.layer_idx : shape.layer_idx;
+            const int l = options_.pin_first_layer && !options_.platform_20261024
+                ? pin.layer_idx : shape.layer_idx;
             if (l >= 1 && l <= 20) occupied[l].push_back(shape.rect);
         }
     }
@@ -148,11 +152,21 @@ Resources::Resources(const DefParser& def, const LefParser& lef, ResourceOptions
                 const double high = std::min(horizontal ? rect.y2 : rect.x2, lines[band + 1]);
                 if (high < low) return;
                 const auto begin = std::lower_bound(values.begin(), values.end(), low);
-                // Shape boundaries include their tracks. Internal GCell upper
-                // boundaries belong exclusively to the following cell.
-                const auto end = high == lines[band + 1] && band + 2 < lines.size()
-                    ? std::lower_bound(values.begin(), values.end(), high)
-                    : std::upper_bound(values.begin(), values.end(), high);
+                // Historical shapes include their upper-edge tracks except
+                // at internal cell boundaries. Platform shapes are half-open
+                // even at the shape's final exterior boundary. If a shape
+                // extends beyond the grid, the last grid track is interior to
+                // the shape and is retained by the closed final capacity band.
+                const auto shape_end = std::lower_bound(values.begin(), values.end(),
+                    horizontal ? rect.y2 : rect.x2);
+                const auto band_end = band + 2 == lines.size()
+                    ? std::upper_bound(values.begin(), values.end(), lines[band + 1])
+                    : std::lower_bound(values.begin(), values.end(), lines[band + 1]);
+                const auto end = options_.platform_20261024
+                    ? std::min(shape_end, band_end)
+                    : ((high == lines[band + 1] && band + 2 < lines.size())
+                        ? std::lower_bound(values.begin(), values.end(), high)
+                        : std::upper_bound(values.begin(), values.end(), high));
                 if (begin == end) return;
                 ranges[static_cast<size_t>(r) * grid_.cols + c].emplace_back(
                     checked_count(static_cast<size_t>(begin - values.begin())),
@@ -213,7 +227,11 @@ std::vector<int> Resources::pin_nodes(const Net& net) const {
     std::vector<int> result;
     for (const auto& pin : net.pins) {
         for (const auto& shape : pin.port_rects) {
-            const int l = options_.pin_first_layer ? pin.layer_idx : shape.layer_idx;
+            const bool macro_pin = !pin.instance_name.empty();
+            if (options_.platform_20261024 && macro_pin &&
+                shape.layer_idx != pin.port_rects.front().layer_idx) continue;
+            const int l = options_.platform_20261024 ? shape.layer_idx
+                : (options_.pin_first_layer ? pin.layer_idx : shape.layer_idx);
             if (l < 1 || l > 20) continue;
             visit_cells(shape.rect, grid_, [&](int c, int r) { result.push_back(node(c, r, l)); });
         }

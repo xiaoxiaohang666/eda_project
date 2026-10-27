@@ -55,6 +55,7 @@ Options parse(int argc,char** argv) {
             std::cout<<"eda_score_compat GUIDE --lefs LEF [--lefs LEF] --input-def DEF\n"
                 "  --thermal-json JSON --output-dir NEW_DIR [--official-runtime DIR]\n"
                 "  [--profile 20261020|legacy-20261011] [--no-csv]\n"
+                "  [--resource-profile 20261020|platform-20261024]\n"
                 "  [--zero-capacity-penalty 10000] [--pin-layer-policy first|shape]\n"
                 "  [--deduplicate-tracks 0|1] [--thermal-gain G]\n"
                 "  [--tsv-cost-ratio 6] [--via-cost-ratio 3] [--tsv-congestion-ratio 1]\n"
@@ -77,6 +78,11 @@ Options parse(int argc,char** argv) {
         else if(key=="--output-dir")o.output=value;
         else if(key=="--official-runtime")o.runtime=value;
         else if(key=="--profile")o.profile=value;
+        else if(key=="--resource-profile") {
+            if(value!="20261020"&&value!="platform-20261024")
+                throw std::runtime_error("resource-profile must be 20261020 or platform-20261024");
+            o.resources.platform_20261024=value=="platform-20261024";
+        }
         else if(key=="--zero-capacity-penalty")o.zero_penalty=number(value);
         else if(key=="--tsv-cost-ratio")o.metrics.tsv_cost_ratio=number(value);
         else if(key=="--via-cost-ratio")o.metrics.via_cost_ratio=number(value);
@@ -96,8 +102,10 @@ Options parse(int argc,char** argv) {
     if(o.zero_penalty<=0)throw std::runtime_error("zero-capacity-penalty must be positive");
     if(o.router_seconds.has_value()!=o.router_memory.has_value())
         throw std::runtime_error("provide both router runtime and peak memory, or neither");
-    if(o.legacy()&&(!o.resources.pin_first_layer||o.resources.deduplicate_tracks))
+    if(o.legacy()&&(!o.resources.pin_first_layer||o.resources.deduplicate_tracks||o.resources.platform_20261024))
         throw std::runtime_error("resource policy overrides apply only to the 20261020 profile");
+    if(o.resources.platform_20261024&&(!o.resources.pin_first_layer||o.resources.deduplicate_tracks))
+        throw std::runtime_error("platform resources require first-layer macro PIN projection and repeated tracks");
     if(o.guide.empty()||o.lefs.empty()||o.def.empty()||o.thermal.empty()||o.output.empty())
         throw std::runtime_error("required: GUIDE --lefs --input-def --thermal-json --output-dir");
     if(!o.explicit_gain)o.metrics.thermal_gain=official_thermal_gain_for_def_file(o.def);
@@ -146,13 +154,19 @@ void write_report(const Options& o,const Result& r) {
        <<",\"official_equivalence\":false,\"basis\":"
        <<quote(o.legacy()?"reproduction-of-archived-official-20261011":"20261020-documents-and-archived-official-unchanged-components")
        <<",\"zero_capacity_penalty\":"<<o.zero_penalty
+       <<",\"resource_profile\":"<<quote(o.legacy()?"legacy-20261011":
+            o.resources.platform_20261024?"platform-20261024":"20261020")
        <<",\"pin_layer_policy\":"<<quote(o.resources.pin_first_layer?"first":"shape")
        <<",\"deduplicate_tracks\":"<<(o.resources.deduplicate_tracks?"true":"false")
        <<",\"assumptions\":["
        <<quote("New official executable is unavailable; exact parity with the October 20 implementation is not established.")<<","
        <<quote("Zero-capacity occupied cells contribute a configurable fixed squared penalty; the official constant and demand dependence are unspecified.")<<","
-       <<quote("October 20 tracks use coordinate-sorted patterns, cell half-open intervals (last cell closed) and closed shape endpoints; duplicate patterns remain separate unless requested.")<<","
-       <<quote("Pin layer policy applies to fixed demand and own-net pin masks; multi-PORT/layer registration in the new official implementation is unconfirmed.")<<","
+       <<quote(o.resources.platform_20261024
+           ?"Observed platform resources use half-open fixed-shape track intervals; capacity retains a closed final cell boundary. This inferred resource policy does not certify official legality."
+           :"October 20 tracks use coordinate-sorted patterns, cell half-open intervals (last cell closed) and closed shape endpoints; duplicate patterns remain separate unless requested.")<<","
+       <<quote(o.resources.platform_20261024
+           ?"Macro PIN fixed demand projects onto its first geometry layer; own-net credit retains only original first-layer shapes. IO resources and credit retain original layers; multilayer IO platform behavior remains unconfirmed."
+           :"Pin layer policy applies to fixed demand and own-net pin masks; multi-PORT/layer registration in the new official implementation is unconfirmed.")<<","
        <<quote("Direction size checks use original DEF first GCELLGRID STEP and raw rectangles; measurement clips to DIEAREA using archived official rules.")<<","
        <<quote("Native FLUTE, via accounting, TSV selection, thermal mapping and basename gain table follow the archived official implementation.")<<","
        <<quote("The documented 128 GB S4 limit is interpreted as 128000000000 bytes; the official decimal/binary unit convention is unconfirmed.")<<"]},\n"

@@ -14,6 +14,7 @@ struct RoutingGraphOptions {
     RoutingGeometryMode geometry{RoutingGeometryMode::PHYSICAL_STRICT};
     bool allow_nonpreferred{true}; // Applies only to abstract GLOBAL_GUIDE adjacency.
     bool score_20261020{false}; // Opt-in documented October 20 resource/direction rules.
+    bool platform_20261024{false}; // Opt-in observed platform resource policy only.
 };
 
 // Resource graph in global DEF DBU. PHYSICAL_STRICT retains preferred-direction
@@ -51,6 +52,7 @@ public:
     bool global_guide_mode() const { return options_.geometry == RoutingGeometryMode::GLOBAL_GUIDE; }
     bool allows_nonpreferred() const { return global_guide_mode() && options_.allow_nonpreferred; }
     bool score_20261020() const { return options_.score_20261020; }
+    bool platform_resources() const { return options_.platform_20261024; }
     // New official scorer capacity and fixed OBS/all-master-PIN demand. These
     // are built only in GLOBAL_GUIDE mode, independently of legacy proxies.
     double official_capacity(int id) const;
@@ -60,8 +62,9 @@ public:
     // The historical profile returns an empty mask, retaining its old demand.
     std::vector<int> own_pin_nodes(const Net& net) const;
     const char* capacity_model() const { return global_guide_mode()
-        ? (score_20261020() ? "20261020-compat-clipped-tracks-and-obs-pin-io-union"
-                            : "official-pattern-track-capacity-and-obs-pin-index-union")
+        ? (platform_resources() ? "20261024-platform-first-macro-pin-half-open-fixed-tracks"
+            : (score_20261020() ? "20261020-compat-clipped-tracks-and-obs-pin-io-union"
+                                : "official-pattern-track-capacity-and-obs-pin-index-union"))
         : "legacy-guide-axis-and-strict-track-corridors"; }
     double ell0() const { return ell0_; }
     const GCellGrid& grid() const { return grid_; }

@@ -69,6 +69,8 @@ bool same_die(int a, int b) { return (a <= 10) == (b <= 10); }
 
 RoutingGraph::RoutingGraph(const DefParser& def, const LefParser& lef, RoutingGraphOptions options)
     : options_(options), grid_(def.gcell_grid()), die_(def.die_area()), dbu_(def.dbu_per_micron()) {
+    if (options_.platform_20261024 && !options_.score_20261020)
+        throw std::runtime_error("platform resources require the October 20 scoring profile");
     if (options_.score_20261020) {
         if (!global_guide_mode())
             throw std::runtime_error("October 20 scoring profile requires GLOBAL_GUIDE geometry mode");
@@ -129,7 +131,11 @@ RoutingGraph::RoutingGraph(const DefParser& def, const LefParser& lef, RoutingGr
             capacities[i] = static_cast<double>(count_interval(values, lines[i], lines[i + 1], i + 1 == capacities.size()));
     }
     if(global_guide_mode()) {
-        if(score_20261020()) updated_resources_=std::make_shared<compat::Resources>(def,lef);
+        if(score_20261020()) {
+            compat::ResourceOptions resources;
+            resources.platform_20261024=platform_resources();
+            updated_resources_=std::make_shared<compat::Resources>(def,lef,resources);
+        }
         else build_official_resources(def,lef);
         legal_.assign(20*plane_,1);via_up_.assign(size(),0);planar_forward_.assign(size(),0);
         for(int id=0;id<static_cast<int>(size());++id) {

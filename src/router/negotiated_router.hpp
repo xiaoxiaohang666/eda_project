@@ -27,6 +27,14 @@ struct RouterOptions {
     bool rrr_score_aware{false};
     size_t rrr_net_limit{128};
     bool official_score_pricing{false};
+    // V7 refinements are opt-in. Bound expensive maze work per rerouted net,
+    // independently of the inexpensive template/negotiation budget.
+    bool v7_rrr{false}, v7_cell_cost{false}, v7_tsv{false}, v7_topology{false};
+    size_t v7_tsv_nets{256}, v7_tsv_candidates{4};
+    double v7_tsv_seconds{30.0};
+    size_t v7_rrr_net_limit{4096}, v7_rrr_astar_net_limit{64};
+    size_t v7_rrr_astar_expansions{20000};
+    double v7_rrr_astar_seconds{0.10};
     bool large_recovery{false};
     size_t large_recovery_nets{1024};
     int large_recovery_rounds{1}, large_recovery_branches{8};
@@ -47,7 +55,13 @@ struct RouterCounters {
            v5_topology_attempted{}, v5_topology_candidates{}, v5_topology_accepted{},
            v5_topology_failures{}, v5_topology_thermal_rejections{},
            v5_topology_budget_skips{}, v5_topology_interruptions{};
-    double v5_topology_seconds{};
+    size_t v7_topology_attempted{}, v7_topology_candidates{}, v7_topology_accepted{}, v7_topology_failures{};
+    double v7_topology_seconds{};
+    size_t v7_rrr_nets{}, v7_astar_nets{}, v7_astar_searches{}, v7_astar_fallbacks{},
+           v7_ledger_checks{}, v7_checkpoint_restores{}, v7_rrr_peak_scope{},
+           v7_tsv_candidates{}, v7_tsv_attempted{}, v7_tsv_accepted{}, v7_tsv_rollbacks{},
+           v7_tsv_failures{}, v7_tsv_budget_stops{};
+    double v5_topology_seconds{}, v7_rrr_seconds{}, v7_validation_seconds{}, v7_tsv_seconds{};
 };
 // One undirected resource key; a Net consumes each resource only once.
 using EdgeKey = uint64_t;
@@ -114,6 +128,7 @@ public:
                       const NetRoute& own, int low, int high, bool dijkstra);
 private:
     friend struct PinLocalTestAccess;
+    friend struct V7RouterTestAccess;
     const DefParser& def_;
     const LefParser& lef_;
     const ThermalParser& thermal_;
@@ -161,6 +176,12 @@ private:
     bool complete_{false}, initial_build_{true};
     bool v5_topology_trial_{false};
     bool recovery_cell_cost_{false};
+    bool v7_refinement_active_{false};
+    size_t v7_refinement_expansion_start_{0};
+    std::chrono::steady_clock::time_point v7_refinement_deadline_;
+    size_t v7_scope_limit_{0};
+    bool v7_search_budget_available() const;
+    void verify_official_ledger(const CompleteMetrics&);
     BudgetedRecoveryStats recovery_stats_;
     bool large_design() const { return def_.nets().size()>1000; }
     bool timed_out() const;
@@ -194,6 +215,7 @@ private:
     bool rrr_round(const std::vector<size_t>&);
     void run_rrr(int);
     void optimize_tsv();
+    void optimize_v7_tsv();
     void recover_wirelength();
     void recover_budgeted_wirelength();
     bool recovery_transaction(size_t,const std::function<std::optional<NetRoute>(const NetRoute&,const CompleteMetrics&)>&);

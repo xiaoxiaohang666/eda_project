@@ -175,6 +175,63 @@ void test_multilayer_pin_policy_and_node_encoding() {
     catch (const std::out_of_range&) { rejected = true; }
     require(rejected, "invalid node queries fail explicitly");
 }
+void test_platform_pin_views_and_original_io_layers() {
+    LefParser lef;
+    DefParser def;
+    parse(lef, def,
+        "MACRO block SIZE 300 BY 300 ; PIN a PORT "
+        "LAYER metal1 ; RECT 10 10 20 20 ; RECT 90 30 110 40 ; "
+        "LAYER metal2 ; RECT 210 210 220 220 ; END END a END block",
+        "TRACKS Y 15 DO 3 STEP 100 LAYER metal1 ; "
+        "TRACKS X 15 DO 3 STEP 100 LAYER metal2 ; ",
+        "COMPONENTS 1 ; - u block + PLACED ( 0 0 ) N ; END COMPONENTS ",
+        "PINS 1 ; - io + LAYER metal1 ( 10 110 ) ( 20 120 ) "
+        "+ LAYER metal2 ( 110 10 ) ( 120 20 ) + FIXED ( 0 0 ) N ; END PINS ",
+        "NETS 2 ; - n ( u a ) ; - io_net ( PIN io ) ; END NETS");
+    const Resources platform(def, lef, {true, false, true});
+    require(platform.fixed_demand(platform.node(2, 2, 1)) == 1 &&
+            platform.fixed_demand(platform.node(2, 2, 2)) == 0,
+            "platform projects every macro PIN shape to its first geometry layer");
+    require(platform.pin_nodes(def.nets()[0]) == std::vector<int>{
+                platform.node(0, 0, 1), platform.node(1, 0, 1)},
+            "projected macro shapes never become additional own-net credit");
+    require(platform.fixed_demand(platform.node(1, 0, 2)) == 1 &&
+            platform.fixed_demand(platform.node(1, 0, 1)) == 0,
+            "platform fixed IO shapes retain their original layers");
+    require(platform.pin_nodes(def.nets()[1]) == std::vector<int>{
+                platform.node(0, 1, 1), platform.node(1, 0, 2)},
+            "platform IO exemption retains every original PORT layer");
+    bool rejected = false;
+    try { Resources inconsistent(def, lef, {false, false, true}); }
+    catch (const std::runtime_error&) { rejected = true; }
+    require(rejected, "platform profile rejects contradictory shape projection override");
+}
+void test_platform_half_open_shape_tracks() {
+    LefParser lef;
+    DefParser def;
+    parse(lef, def,
+        "MACRO block SIZE 300 BY 300 ; OBS "
+        "LAYER metal1 ; RECT 0 10 100 30 ; RECT 200 280 300 300 ; RECT 100 290 200 310 ; "
+        "LAYER metal2 ; RECT 10 100 30 200 ; RECT 280 200 300 300 ; RECT 290 100 310 200 ; END "
+        "PIN a PORT LAYER metal3 ; RECT 150 150 160 160 ; END END a END block",
+        "TRACKS Y 0 DO 31 STEP 10 LAYER metal1 ; "
+        "TRACKS X 0 DO 31 STEP 10 LAYER metal2 ; ",
+        "COMPONENTS 1 ; - u block + PLACED ( 0 0 ) N ; END COMPONENTS ",
+        "PINS 0 ; END PINS ", "NETS 1 ; - n ( u a ) ; END NETS");
+    const Resources historical(def, lef), platform(def, lef, {true, false, true});
+    for (const int node : {platform.node(0, 0, 1), platform.node(2, 2, 1),
+                          platform.node(0, 1, 2), platform.node(2, 2, 2)}) {
+        require(historical.fixed_demand(node) == 3 && platform.fixed_demand(node) == 2,
+                "platform excludes upper-edge track in H/V and final exterior cells");
+        require(historical.capacity(node) == platform.capacity(node),
+                "half-open fixed shapes do not change cell capacity");
+    }
+    require(platform.fixed_demand(platform.node(1, 2, 1)) == 2 &&
+            platform.fixed_demand(platform.node(2, 1, 2)) == 2,
+            "track at final grid boundary stays occupied when interior to a shape extending beyond grid");
+    require(platform.capacity(platform.node(2, 2, 1)) == 11,
+            "platform capacity still includes the final exterior grid track");
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -187,6 +244,8 @@ int main(int argc, char** argv) {
         test_duplicate_and_unsorted_patterns();
         test_io_orientation_and_masks();
         test_multilayer_pin_policy_and_node_encoding();
+        test_platform_pin_views_and_original_io_layers();
+        test_platform_half_open_shape_tracks();
         std::cout << "Compatibility resource tests passed: " << checks << " checks\n";
         return 0;
     } catch (const std::exception& error) {
