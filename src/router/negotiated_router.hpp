@@ -35,6 +35,13 @@ struct RouterOptions {
     size_t v7_rrr_net_limit{4096}, v7_rrr_astar_net_limit{64};
     size_t v7_rrr_astar_expansions{20000};
     double v7_rrr_astar_seconds{0.10};
+    // V8 stages remain opt-in so A0 uses the identical V7 algorithm.
+    bool v8_rrr{false}, v8_tsv_dynamic{false}, v8_tsv_rematch{false}, v8_recovery{false};
+    bool unified_budget{false}, score_unit_cost{false};
+    double congestion_price_cap{10000};
+    size_t v8_rrr_group_size{48}, v8_tsv_probe_candidates{2};
+    size_t v8_tsv_rematch_group_size{6}, v8_tsv_rematch_nets{256};
+    double v8_tsv_rematch_seconds{30};
     bool large_recovery{false};
     size_t large_recovery_nets{1024};
     int large_recovery_rounds{1}, large_recovery_branches{8};
@@ -61,6 +68,12 @@ struct RouterCounters {
            v7_ledger_checks{}, v7_checkpoint_restores{}, v7_rrr_peak_scope{},
            v7_tsv_candidates{}, v7_tsv_attempted{}, v7_tsv_accepted{}, v7_tsv_rollbacks{},
            v7_tsv_failures{}, v7_tsv_budget_stops{};
+    size_t v8_rrr_groups{}, v8_rrr_groups_accepted{}, v8_rrr_groups_rejected{}, v8_rrr_group_nets{};
+    size_t v8_rematch_groups{}, v8_rematch_candidates{}, v8_rematch_accepted{}, v8_rematch_rollbacks{}, v8_rematch_failures{};
+    size_t v8_tsv_probed_nets{}, v8_tsv_unique_nets{}, v8_tsv_repeat_visits{}, v8_tsv_probe_queries{}, v8_tsv_refreshes{};
+    std::array<size_t,3> v8_tsv_queue_visits{};
+    std::array<double,3> v8_tsv_queue_gain{}, v8_tsv_queue_seconds{};
+    double v8_rrr_seconds{}, v8_rematch_seconds{}, v8_tsv_probe_seconds{};
     double v5_topology_seconds{}, v7_rrr_seconds{}, v7_validation_seconds{}, v7_tsv_seconds{};
 };
 // One undirected resource key; a Net consumes each resource only once.
@@ -129,6 +142,9 @@ public:
 private:
     friend struct PinLocalTestAccess;
     friend struct V7RouterTestAccess;
+    friend struct HotspotRrrTestAccess;
+    friend struct DynamicTsvTestAccess;
+    friend struct TsvRematchTestAccess;
     const DefParser& def_;
     const LefParser& lef_;
     const ThermalParser& thermal_;
@@ -140,6 +156,7 @@ private:
     std::vector<std::vector<int>> own_pin_nodes_;
     long double full_reference_{0};
     std::vector<NetRoute> routes_;
+    std::vector<double> pre_tsv_lengths_;
     GuideMap guides_;
     std::vector<int> demand_;
     std::unordered_map<EdgeKey,int> usage_;
@@ -168,7 +185,7 @@ private:
     // full internal validation caches a generation; serialized readback stays independent.
     uint64_t state_generation_{0};
     mutable uint64_t pricing_generation_{std::numeric_limits<uint64_t>::max()};
-    mutable double congestion_price_{1}, congestion_price_min_{10000}, congestion_price_max_{0};
+    mutable double congestion_price_{1}, congestion_price_min_{std::numeric_limits<double>::infinity()}, congestion_price_max_{0};
     mutable size_t pricing_updates_{0};
     mutable uint64_t validated_generation_{0};
     mutable bool complete_validation_cached_{false};
@@ -189,6 +206,8 @@ private:
     void check_v5_topology_budget() const;
     bool v5_topology_better(const NetRoute&,const NetRoute&,const CompleteMetrics&) const;
     double official_congestion_price() const;
+    double official_search_scale() const;
+    double official_cell_search_cost(int) const;
     const std::vector<int>& cell_owners(int) const;
     double edge_cost(int,int,const NetRoute&) const;
     double access_cost(const PinAccess&,const NetRoute* own=nullptr) const;
@@ -216,6 +235,9 @@ private:
     void run_rrr(int);
     void optimize_tsv();
     void optimize_v7_tsv();
+    void run_hotspot_rrr(int);
+    void optimize_dynamic_tsv();
+    void rematch_tsv_ownership();
     void recover_wirelength();
     void recover_budgeted_wirelength();
     bool recovery_transaction(size_t,const std::function<std::optional<NetRoute>(const NetRoute&,const CompleteMetrics&)>&);

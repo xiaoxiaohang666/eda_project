@@ -27,6 +27,11 @@ std::vector<size_t> NegotiatedRouter::recovery_selection() const {
         else if(m.wirelength>0) zero.push_back(i);
     }
     auto rank=[&](size_t a,size_t b) {
+        if(options_.v8_recovery && pre_tsv_lengths_.size()==routes_.size()) {
+            const double da=std::max(0.0,routes_[a].measured.wirelength-pre_tsv_lengths_[a]);
+            const double db=std::max(0.0,routes_[b].measured.wirelength-pre_tsv_lengths_[b]);
+            if(da!=db) return da>db;
+        }
         const double x=std::max(0.0,routes_[a].measured.wirelength-routes_[a].measured.reference);
         const double y=std::max(0.0,routes_[b].measured.wirelength-routes_[b].measured.reference);
         return x!=y?x>y:def_.nets()[a].name<def_.nets()[b].name;
@@ -77,7 +82,7 @@ bool NegotiatedRouter::recovery_transaction(size_t index,
            !(official_candidate_key(trial,base)<official_candidate_key(old,base))) {restore();return false;}
         routes_[index]=std::move(trial);account(index,routes_[index],1);installed=true;
         auto after=recovery_metrics(before);
-        if(after.official.zero_capacity_cells>before.official.zero_capacity_cells ||
+        if((options_.unified_budget&&timed_out()) || after.official.zero_capacity_cells>before.official.zero_capacity_cells ||
            after.guide.quality<=before.guide.quality+1e-12) {restore();return false;}
         after.physical_length+=routes_[index].length-old.length;
         after.vias=after.vias-old.vias+routes_[index].vias;
@@ -170,6 +175,23 @@ std::vector<std::pair<int,int>> NegotiatedRouter::recovery_seeds(size_t index,co
         for(size_t k=0;k<std::min(size_t(2),junctions.size());++k) candidates.push_back(junctions[k].second);
         for(auto [x,y]:std::vector<std::pair<int,int>>{{cols.front(),r},{cols.back(),r},{c,rows.front()},{c,rows.back()}})
             candidates.push_back(graph_.node(x,y,l));
+        if(options_.v8_recovery) {
+            const int low=side?11:1,high=side?20:(old.slot>=0?9:10);
+            std::vector<int> layers,shifted;
+            for(int dl:{-1,1,-2,2}) if(l+dl>=low&&l+dl<=high) layers.push_back(graph_.node(c,r,l+dl));
+            for(auto [dc,dr]:std::array<std::pair<int,int>,4>{{{-1,0},{1,0},{0,-1},{0,1}}})
+                if(c+dc>=0&&c+dc<graph_.grid().cols&&r+dr>=0&&r+dr<graph_.grid().rows)
+                    shifted.push_back(graph_.node(c+dc,r+dr,l));
+            // Each side gets four probes under the default two-die budget:
+            // median, an existing/Hanan trunk, a shifted trunk, and a layer.
+            std::vector<int> interleaved{candidates.front()};
+            for(size_t k=0;k<std::max({candidates.size()-1,shifted.size(),layers.size()});++k) {
+                if(k+1<candidates.size()) interleaved.push_back(candidates[k+1]);
+                if(k<shifted.size()) interleaved.push_back(shifted[k]);
+                if(k<layers.size()) interleaved.push_back(layers[k]);
+            }
+            candidates=std::move(interleaved);
+        }
         std::set<int> unique;
         for(int n:candidates) if(graph_.legal_node(n)&&unique.insert(n).second) result.emplace_back(side,n);
     }
@@ -260,13 +282,13 @@ void NegotiatedRouter::recover_budgeted_wirelength() {
         throw std::runtime_error("invalid budgeted recovery budget");
     const auto phase_start=std::chrono::steady_clock::now();
     const auto previous_deadline=deadline_;const double previous_present=present_,previous_history=history_scale_;
-    const bool previous_cell=recovery_cell_cost_;
+    const bool previous_cell=recovery_cell_cost_,previous_trial=v5_topology_trial_;
     struct RestorePhase {std::function<void()> action;~RestorePhase(){action();}} restore{[&] {
-        deadline_=previous_deadline;present_=previous_present;history_scale_=previous_history;recovery_cell_cost_=previous_cell;
+        deadline_=previous_deadline;present_=previous_present;history_scale_=previous_history;recovery_cell_cost_=previous_cell;v5_topology_trial_=previous_trial;
     }};
-    // Independent phase budget, additional to initial routing/RRR. Candidate
-    // searches check this deadline too; the benchmark supplies a process limit.
-    deadline_=phase_start+std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(options_.large_recovery_seconds));
+    const auto stage_deadline=phase_start+std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(options_.large_recovery_seconds));
+    deadline_=options_.unified_budget?std::min(previous_deadline,stage_deadline):stage_deadline;
+    if(options_.unified_budget) v5_topology_trial_=true;
     history_scale_=0;recovery_cell_cost_=true;recovery_stats_={};
     validate_complete();best_metrics_=measure();recovery_stats_.before=best_metrics_;
     CompleteMetrics checkpoint=best_metrics_;std::vector<std::pair<size_t,NetRoute>> journal;

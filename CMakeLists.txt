@@ -277,3 +277,15 @@ if(BUILD_TESTING)
         "${CMAKE_CURRENT_BINARY_DIR}/v7-router-artifacts"
         "${CMAKE_CURRENT_SOURCE_DIR}/output/runtime/official-flute")
 endif()
+
+if(BUILD_TESTING)
+    foreach(name hotspot_rrr dynamic_tsv tsv_rematch)
+        add_executable(${name}_tests tests/${name}_tests.cpp)
+        target_link_libraries(${name}_tests PRIVATE eda_core)
+        add_test(NAME ${name} COMMAND ${name}_tests "${CMAKE_CURRENT_BINARY_DIR}/${name}-artifacts"
+            "${CMAKE_CURRENT_SOURCE_DIR}/output/runtime/official-flute")
+    endforeach()
+    add_test(NAME v8_cli COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_v8_cli.py"
+        "$<TARGET_FILE:eda_router>" "$<TARGET_FILE:eda_score_compat>" "$<TARGET_FILE:eda_validate_guide>"
+        "${CMAKE_CURRENT_SOURCE_DIR}/output/runtime/official-flute")
+endif()

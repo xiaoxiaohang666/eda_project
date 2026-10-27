@@ -96,6 +96,20 @@ struct PinLocalTestAccess {
         near(router.official_congestion_price(),1,"physical model ignores official score pricing");
         require(router.pricing_updates_==updates,"physical model does not refresh the official price cache");
         require(router.congestion_price_min_==.01 && router.congestion_price_max_==10000,"reported price bounds reflect actual clipped queries");
+        router.options_.official_model=true;router.options_.congestion_price_cap=1e9;
+        state(router,1000000,1e8L,1000000,0);
+        require(router.official_congestion_price()>10000,"higher experimental ceiling preserves previously compressed prices");
+        router.options_.congestion_price_cap=10000;
+        router.options_.score_unit_cost=true;
+        state(router,1000000,1400000,1000000,.3L);
+        const int n=router.graph_.node(1,0,1);
+        router.demand_[n]=20;router.present_=1;router.guide_history_[n]=0;
+        const long double dq=.01L*(1.1L*1.1L-1);
+        near(router.official_cell_search_cost(n),30/std::sqrt(1.3L)-30/std::sqrt(1.3L+dq),
+            "score-unit congestion cost equals independent finite C loss",2e-10L);
+        near(router.official_search_scale(),45e6L*router.graph_.ell0()/(1400000.0L*1400000),
+            "score-unit length scale is weighted W derivative per ell0");
+        router.demand_[n]=0;router.options_.score_unit_cost=false;
     }
     static void generation(NegotiatedRouter& router) {
         state(router,1000000,0,0,0);

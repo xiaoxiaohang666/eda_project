@@ -148,11 +148,33 @@ double NegotiatedRouter::official_congestion_price() const {
         const long double squared=std::max(0.0L,official_squared_overflow_);
         scale=length*length/(300.0L*full_reference_*graph_.ell0()*std::pow(1.0L+squared,1.5L));
     }
-    congestion_price_=double(std::clamp(scale,0.01L,10000.0L));
+    congestion_price_=double(std::clamp(scale,std::min(0.01L,(long double)options_.congestion_price_cap),(long double)options_.congestion_price_cap));
     congestion_price_min_=std::min(congestion_price_min_,congestion_price_);
     congestion_price_max_=std::max(congestion_price_max_,congestion_price_);
     pricing_generation_=state_generation_;++pricing_updates_;
     return congestion_price_;
+}
+// Search costs in weighted score points. Freeze the other-net Q during a
+// path search, charge the exact one-cell C loss, and keep history/present
+// negotiation explicit. Final candidate acceptance still uses full encoded S.
+double NegotiatedRouter::official_search_scale() const {
+    if(!options_.score_unit_cost || !options_.official_model) return 1;
+    const long double length=std::max(full_reference_,official_wirelength_+full_reference_-official_reference_);
+    return full_reference_>0 ? double(45*full_reference_*graph_.ell0()/(length*length)) : 1;
+}
+double NegotiatedRouter::official_cell_search_cost(int node) const {
+    const double raw=graph_.official_capacity(node),u=graph_.official_obstacle_demand(node)+demand_[node];
+    const double scale=official_search_scale();
+    if(raw<=0 && !options_.score_unit_cost) return 1e6;
+    const double before=raw>0?std::max(0.0,u-raw)/raw:0,after=raw>0?std::max(0.0,u+1-raw)/raw:0;
+    const double dq=raw<=0?(u<=0?10000.0:0.0):.01*(after*after-before*before);
+    if(options_.score_unit_cost) {
+        const double q=double(std::max(0.0L,official_squared_overflow_));
+        // Rationalized subtraction avoids cancellation for tiny marginal Q.
+        const double a=std::sqrt(1+q),b=std::sqrt(1+q+dq);
+        return present_*30*dq/(a*b*(a+b))+history_scale_*guide_history_[node]*scale;
+    }
+    return 100*official_congestion_price()*present_*0.01*(after*after-before*before)+history_scale_*guide_history_[node];
 }
 bool NegotiatedRouter::pin_exempt(size_t net,int node) const {
     return net<own_pin_nodes_.size() && std::binary_search(own_pin_nodes_[net].begin(),own_pin_nodes_[net].end(),node);
@@ -176,6 +198,7 @@ double NegotiatedRouter::edge_cost(int a,int b,const NetRoute& own) const {
         if(graph_.layer(a)!=graph_.layer(b))
             result+=m.via_cost_ratio*std::max(m.gcell_width_dbu,m.gcell_height_dbu)/graph_.ell0();
     }
+    result*=official_search_scale();
     const double cap=graph_.edge_capacity(a,b);
     auto it=usage_.find(key);
     const int u=it==usage_.end()?0:it->second;
@@ -185,10 +208,7 @@ double NegotiatedRouter::edge_cost(int a,int b,const NetRoute& own) const {
     }
     if(!own.nodes.count(b) && !pin_exempt(own.net_index,b)) {
         if(options_.official_model) {
-            const double raw=graph_.official_capacity(b),u=graph_.official_obstacle_demand(b)+demand_[b];
-            if(raw<=0) result+=1e6;
-            else {double before=std::max(0.0,u-raw)/raw,after=std::max(0.0,u+1-raw)/raw;
-                result+=100*official_congestion_price()*present_*0.01*(after*after-before*before)+history_scale_*guide_history_[b];}
+            result+=official_cell_search_cost(b);
         } else result+=present_*marginal(demand_[b],graph_.guide_capacity(b))+history_scale_*guide_history_[b];
     }
     return result;
@@ -198,6 +218,7 @@ double NegotiatedRouter::access_cost(const PinAccess& a,const NetRoute* own) con
     const bool cell_cost=recovery_cell_cost_ || (options_.v7_cell_cost && options_.official_model);
     if(cell_cost) result=options_.official_metrics.via_cost_ratio*a.vias*
         std::max(options_.official_metrics.gcell_width_dbu,options_.official_metrics.gcell_height_dbu)/graph_.ell0();
+    result*=official_search_scale();
     std::set<int> touched;
     const auto& grid=graph_.grid();
     for(const auto& g:a.guides) {
@@ -207,13 +228,10 @@ double NegotiatedRouter::access_cost(const PinAccess& a,const NetRoute* own) con
             int n=graph_.node(c,r,get_layer_index(g.layer));
             if(n>=0 && touched.insert(n).second) {
                 if(cell_cost && !(options_.v7_cell_cost && own && own->nodes.count(n))) result+=(lef_.get_layer_direction(g.layer)==Direction::HORIZONTAL?
-                    options_.official_metrics.gcell_width_dbu:options_.official_metrics.gcell_height_dbu)/graph_.ell0();
+                    options_.official_metrics.gcell_width_dbu:options_.official_metrics.gcell_height_dbu)/graph_.ell0()*official_search_scale();
                 if(options_.official_metrics.score_20261020 && own && (own->nodes.count(n)||pin_exempt(own->net_index,n))) continue;
                 if(options_.official_model) {
-                    const double raw=graph_.official_capacity(n),u=graph_.official_obstacle_demand(n)+demand_[n];
-                    if(raw<=0) result+=1e6;
-                    else {double before=std::max(0.0,u-raw)/raw,after=std::max(0.0,u+1-raw)/raw;
-                        result+=100*official_congestion_price()*present_*0.01*(after*after-before*before)+history_scale_*guide_history_[n];}
+                    result+=official_cell_search_cost(n);
                 } else result+=present_*marginal(demand_[n],graph_.guide_capacity(n))+history_scale_*guide_history_[n];
             }
         }
@@ -533,6 +551,7 @@ PathResult NegotiatedRouter::search(const std::vector<PinAccess>& sources,const 
         return direct;
     }
     auto heuristic=[&](int n) {
+        if(options_.score_unit_cost) return 0.0;
         // Free existing-tree edges/cells invalidate a geometric lower bound.
         // The bounded V7 refinement uses h=0; templates remain its incumbent.
         if(dijkstra || v7_refinement_active_ || (options_.v7_cell_cost && options_.official_model)) return 0.0;
@@ -589,7 +608,7 @@ PathResult NegotiatedRouter::search(const std::vector<PinAccess>& sources,const 
         if(cost<incumbent.cost) {
             incumbent={PathResult::Status::FOUND,std::move(path),si,cost};incumbent_from_z=z;
         }
-        return std::pair(cost,cost>base+1e-9);
+        return std::pair(cost,options_.score_unit_cost || cost>base+1e-9);
     };
     if(!dijkstra) {
         std::vector<std::pair<double,int>> ranked;ranked.reserve(targets.size());
@@ -1572,14 +1591,14 @@ bool NegotiatedRouter::rrr_round(const std::vector<size_t>& scope) {
             after.physical_length+=routes_[i].length-old.length;
             after.vias=after.vias-old.vias+routes_[i].vias;
         }
-        if(!incremental || better(after,before)) {
+        if((!incremental || better(after,before)) && (!options_.v8_rrr || (!timed_out()&&after.official.zero_capacity_cells<=before.official.zero_capacity_cells))) {
             const auto started=std::chrono::steady_clock::now();
             validate_complete();after=measure();
             if(incremental) {
                 verify_official_ledger(after);
                 counters_.v7_validation_seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
             }
-            if(better(after,before)) {best_metrics_=after;++counters_.rrr_accepted;return true;}
+            if(better(after,before) && (!options_.v8_rrr || (!timed_out()&&after.official.zero_capacity_cells<=before.official.zero_capacity_cells))) {best_metrics_=after;++counters_.rrr_accepted;return true;}
         }
         ++rejection_reasons_["RRR round did not improve the complete comparison key"];
         rollback();return false;
@@ -1940,8 +1959,17 @@ bool NegotiatedRouter::route_all() {
         validate_complete();initial_metrics_=best_metrics_=measure();complete_=true;
         std::cout<<"[INITIAL] nets="<<routes_.size()<<" slots="<<policy_.slots().size()<<" guide_overflow="<<best_metrics_.guide.overflow
                  <<" physical_overflow="<<best_metrics_.physical_overflow<<"\n";
-        if(options_.v7_rrr && options_.official_model) {
-            try { run_rrr(options_.rrr_rounds); }
+        if((options_.v7_rrr||options_.v8_rrr) && options_.official_model) {
+            const auto total_deadline=deadline_;
+            if(options_.unified_budget) {
+                // Reserve a tail inside the same total deadline for TSV/recovery.
+                const double remaining=std::max(0.0,std::chrono::duration<double>(deadline_-std::chrono::steady_clock::now()).count());
+                const double tail=(options_.v7_tsv?options_.v7_tsv_seconds:0)+
+                    (options_.v8_tsv_rematch?options_.v8_tsv_rematch_seconds:0)+
+                    (options_.large_recovery?options_.large_recovery_seconds:0);
+                deadline_-=std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(std::min(.65*remaining,tail)));
+            }
+            try { if(options_.v8_rrr) run_hotspot_rrr(options_.rrr_rounds);else run_rrr(options_.rrr_rounds); }
             catch(const std::exception& e) {
                 // rrr_round rolls its entire journal back before throwing.
                 // Export only after the restored checkpoint verifies exactly.
@@ -1949,12 +1977,18 @@ bool NegotiatedRouter::route_all() {
                 ++rejection_reasons_[std::string("V7 optional RRR stopped: ")+e.what()];
                 validate_complete();best_metrics_=measure();verify_official_ledger(best_metrics_);
             }
+            deadline_=total_deadline;
         } else run_rrr(large_design()?std::min(3,options_.rrr_rounds):options_.rrr_rounds);
         // Global-grid supply can contain millions of cells even with few nets.
         // Its bounded spatial assignment/polish replaces this exhaustive
         // legacy net x reservation proposal enumeration.
         if(!large_design() && options_.tsv_policy.resource_mode!=TsvResourceMode::GLOBAL_GRID) optimize_tsv();
-        if(options_.v7_tsv) optimize_v7_tsv();
+        pre_tsv_lengths_.clear();
+        if(options_.v8_recovery) for(const auto& route:routes_) pre_tsv_lengths_.push_back(route.measured.wirelength);
+        if(options_.v7_tsv) {
+            if(options_.v8_tsv_dynamic) optimize_dynamic_tsv();else optimize_v7_tsv();
+        }
+        if(options_.v8_tsv_rematch) rematch_tsv_ownership();
         pre_recovery_metrics_=measure();
         if(!large_design()) recover_wirelength();
         if(options_.large_recovery) recover_budgeted_wirelength();
@@ -2114,6 +2148,32 @@ bool NegotiatedRouter::export_stats(const std::string& path) const {
            <<",\"v7_tsv_failures\":"<<counters_.v7_tsv_failures
            <<",\"v7_tsv_budget_stops\":"<<counters_.v7_tsv_budget_stops
            <<",\"v7_tsv_seconds\":"<<counters_.v7_tsv_seconds
+           <<",\"v8_rrr_groups\":"<<counters_.v8_rrr_groups
+           <<",\"v8_rrr_groups_accepted\":"<<counters_.v8_rrr_groups_accepted
+           <<",\"v8_rrr_groups_rejected\":"<<counters_.v8_rrr_groups_rejected
+           <<",\"v8_rrr_group_nets\":"<<counters_.v8_rrr_group_nets
+           <<",\"v8_rrr_seconds\":"<<counters_.v8_rrr_seconds
+           <<",\"v8_rematch_groups\":"<<counters_.v8_rematch_groups
+           <<",\"v8_rematch_candidates\":"<<counters_.v8_rematch_candidates
+           <<",\"v8_rematch_accepted\":"<<counters_.v8_rematch_accepted
+           <<",\"v8_rematch_rollbacks\":"<<counters_.v8_rematch_rollbacks
+           <<",\"v8_rematch_failures\":"<<counters_.v8_rematch_failures
+           <<",\"v8_rematch_seconds\":"<<counters_.v8_rematch_seconds
+           <<",\"v8_tsv_probed_nets\":"<<counters_.v8_tsv_probed_nets
+           <<",\"v8_tsv_unique_nets\":"<<counters_.v8_tsv_unique_nets
+           <<",\"v8_tsv_repeat_visits\":"<<counters_.v8_tsv_repeat_visits
+           <<",\"v8_tsv_probe_queries\":"<<counters_.v8_tsv_probe_queries
+           <<",\"v8_tsv_refreshes\":"<<counters_.v8_tsv_refreshes
+           <<",\"v8_tsv_probe_seconds\":"<<counters_.v8_tsv_probe_seconds
+           <<",\"v8_tsv_wirelength_visits\":"<<counters_.v8_tsv_queue_visits[0]
+           <<",\"v8_tsv_wirelength_gain\":"<<counters_.v8_tsv_queue_gain[0]
+           <<",\"v8_tsv_wirelength_seconds\":"<<counters_.v8_tsv_queue_seconds[0]
+           <<",\"v8_tsv_thermal_visits\":"<<counters_.v8_tsv_queue_visits[1]
+           <<",\"v8_tsv_thermal_gain\":"<<counters_.v8_tsv_queue_gain[1]
+           <<",\"v8_tsv_thermal_seconds\":"<<counters_.v8_tsv_queue_seconds[1]
+           <<",\"v8_tsv_congestion_visits\":"<<counters_.v8_tsv_queue_visits[2]
+           <<",\"v8_tsv_congestion_gain\":"<<counters_.v8_tsv_queue_gain[2]
+           <<",\"v8_tsv_congestion_seconds\":"<<counters_.v8_tsv_queue_seconds[2]
            <<",\"v5_topology_attempted\":"<<counters_.v5_topology_attempted
            <<",\"v5_topology_candidates\":"<<counters_.v5_topology_candidates
            <<",\"v5_topology_accepted\":"<<counters_.v5_topology_accepted
@@ -2147,6 +2207,18 @@ bool NegotiatedRouter::export_stats(const std::string& path) const {
            <<",\"v7_tsv_nets\":"<<options_.v7_tsv_nets
            <<",\"v7_tsv_candidates\":"<<options_.v7_tsv_candidates
            <<",\"v7_tsv_seconds\":"<<options_.v7_tsv_seconds
+           <<",\"v8_rrr\":"<<(options_.v8_rrr?"true":"false")
+           <<",\"v8_tsv_dynamic\":"<<(options_.v8_tsv_dynamic?"true":"false")
+           <<",\"v8_tsv_rematch\":"<<(options_.v8_tsv_rematch?"true":"false")
+           <<",\"v8_recovery\":"<<(options_.v8_recovery?"true":"false")
+           <<",\"unified_budget\":"<<(options_.unified_budget?"true":"false")
+           <<",\"score_unit_cost\":"<<(options_.score_unit_cost?"true":"false")
+           <<",\"v8_rrr_group_size\":"<<options_.v8_rrr_group_size
+           <<",\"v8_tsv_probe_candidates\":"<<options_.v8_tsv_probe_candidates
+           <<",\"v8_tsv_rematch_group_size\":"<<options_.v8_tsv_rematch_group_size
+           <<",\"v8_tsv_rematch_nets\":"<<options_.v8_tsv_rematch_nets
+           <<",\"v8_tsv_rematch_seconds\":"<<options_.v8_tsv_rematch_seconds
+           <<",\"congestion_price_cap\":"<<options_.congestion_price_cap
            <<",\"official_score_pricing\":"<<(options_.official_score_pricing?"true":"false")
            <<",\"congestion_price_updates\":"<<pricing_updates_
            <<",\"congestion_price_min\":"<<(pricing_updates_?congestion_price_min_:1)

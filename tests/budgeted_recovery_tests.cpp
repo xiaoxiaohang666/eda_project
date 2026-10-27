@@ -219,6 +219,19 @@ struct PinLocalTestAccess {
         require(router.deadline_==deadline && router.present_==2.5 && router.history_scale_==7 && !router.recovery_cell_cost_,
             "phase exit restores the prior deadline, negotiated prices and search cost mode");
         parity(router,"budgeted early exit");
+        router.options_.unified_budget=true;router.options_.large_recovery_seconds=10;
+        router.recover_budgeted_wirelength();
+        require(router.recovery_stats_.timed_out && router.recovery_stats_.attempted==0,
+            "expired shared deadline cannot be extended by a positive recovery stage budget");
+        require(ledger(router)==before && router.deadline_==deadline,"shared recovery timeout preserves incumbent and outer cutoff");
+        router.options_.unified_budget=false;
+        router.options_.v8_recovery=true;router.options_.large_recovery_nets=2;
+        router.pre_tsv_lengths_.resize(router.routes_.size());
+        for(size_t i=0;i<router.routes_.size();++i) router.pre_tsv_lengths_[i]=router.routes_[i].measured.wirelength;
+        router.pre_tsv_lengths_[zero]=0;
+        const auto migration=router.recovery_selection();
+        require(!migration.empty()&&migration.front()==zero,"TSV migration increment outranks preexisting excess length");
+        router.options_.v8_recovery=false;
     }
     static void cell_cost(NegotiatedRouter& router) {
         router.recovery_cell_cost_=true;router.present_=0;router.history_scale_=0;
@@ -241,6 +254,14 @@ struct PinLocalTestAccess {
         require(seeds.size()==8 && seeds==router.recovery_seeds(shared,old),"shared seed budget is at most eight and deterministic");
         require(std::count_if(seeds.begin(),seeds.end(),[](auto p){return p.first==0;})==4,"round-robin seeds preserve both die sides within the shared budget");
         for(auto [side,node]:seeds)require(router.graph_.legal_node(node) && (router.graph_.layer(node)>10)==bool(side),"shared branch seed is legal and on its declared die");
+        router.options_.v8_recovery=true;
+        const auto varied=router.recovery_seeds(shared,old);
+        for(int side=0;side<2;++side) {
+            std::set<int> layers,positions;
+            for(auto [die,node]:varied) if(die==side) {layers.insert(router.graph_.layer(node));positions.insert(router.graph_.row(node)*router.graph_.grid().cols+router.graph_.col(node));}
+            require(layers.size()>1&&positions.size()>1,"default V8 seeds include both trunk location and layer alternatives on each die");
+        }
+        router.options_.v8_recovery=false;
         router.options_.large_recovery_branches=3;require(router.recovery_seeds(shared,old).size()==3,"smaller explicit branch budget is respected");
         router.options_.large_recovery_branches=8;const auto crowded=router.build_candidate(many,-1,0);
         require(router.def_.nets()[many].pins.size()==17 && router.recovery_seeds(many,crowded).empty(),"more than sixteen terminals bypass global shared-seed enumeration");
