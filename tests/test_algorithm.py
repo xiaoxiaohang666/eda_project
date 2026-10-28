@@ -160,42 +160,41 @@ class AlgorithmTests(unittest.TestCase):
             self.assertGreaterEqual(x2, assignments[name]["x"])
             self.assertGreaterEqual(y2, assignments[name]["y"])
 
-    def test_package_checker_points_are_covered_without_replacing_real_pins(self):
-        # The package checker omits instance orientation. Parse its checkpoint
-        # convention independently for this fixed fixture; C++ validation also
-        # checks the actual transformed points before export.
+    def test_actual_oriented_pin_centers_are_covered(self):
+        # Coverage follows DEF orientation and LEF geometry. The historical
+        # evaluator's untransformed checkpoints are not routing terminals.
         text = (CASE / "sample001.input.def").read_text()
         lef = (CASE / "sample001.input.lef").read_text()
+        dbu = float(re.search(r"UNITS DISTANCE MICRONS (\d+)", text).group(1))
         macros = {}
         for name, body in re.findall(r"\bMACRO\s+(\w+)\b(.*?)END\s+\1\b", lef, re.S):
+            w, h = map(float, re.search(r"SIZE\s+([\d.]+)\s+BY\s+([\d.]+)", body).groups())
+            origin = re.search(r"ORIGIN\s+([-\d.]+)\s+([-\d.]+)", body)
+            ox, oy = map(float, origin.groups()) if origin else (0., 0.)
             pins = {}
             for pname, pbody in re.findall(r"\bPIN\s+(\w+)\b(.*?)END\s+\1\b", body, re.S):
                 match = re.search(r"LAYER\s+(metal\d+)\s*;\s*RECT\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)", pbody)
                 if match:
                     layer, x1, y1, x2, y2 = match.groups()
-                    pins[pname] = ((float(x1) + float(x2)) * 1000,
-                                   (float(y1) + float(y2)) * 1000, layer)
-            macros[name] = pins
-        components_text = text.split("COMPONENTS ", 1)[1].split("END COMPONENTS", 1)[0]
-        components = {}
-        for name, macro, x, y in re.findall(
-                r"-\s+(\S+)\s+(\S+)\s+\+\s+(?:PLACED|FIXED)\s*\(\s*(\d+)\s+(\d+)\s*\)",
-                components_text):
-            components[name] = (macro, int(x), int(y))
-        guide = parse_guide(self.full[0])
-        net_text = text.split("NETS ", 1)[1].split("END NETS", 1)[0]
-        count = 0
-        for name, body in re.findall(r"-\s+(\S+)\s+(.*?);", net_text, re.S):
-            for instance, pname in re.findall(r"\(\s*(\S+)\s+(\S+)\s*\)", body):
-                if instance == "PIN":
-                    continue
-                macro, x, y = components[instance]
-                px, py, layer = macros[macro][pname]
-                px, py = px + x, py + y
-                self.assertTrue(any(r[4] == layer and r[0] <= px <= r[2] and r[1] <= py <= r[3]
-                                    for r in guide[name]), f"missing package checkpoint {name}/{instance}.{pname}")
-                count += 1
-        self.assertGreater(count, 400)
+                    pins[pname] = ((float(x1)+float(x2))/2+ox,(float(y1)+float(y2))/2+oy,layer)
+            macros[name] = (pins,w,h)
+        components_text = text.split("COMPONENTS ",1)[1].split("END COMPONENTS",1)[0]
+        components = {name:(macro,int(x),int(y),orient) for name,macro,x,y,orient in re.findall(
+            r"-\s+(\S+)\s+(\S+)\s+\+\s+(?:PLACED|FIXED)\s*\(\s*(-?\d+)\s+(-?\d+)\s*\)\s+(N|S|E|W|FN|FS|FE|FW)\b",components_text)}
+        guide = parse_guide(self.full[0]);count=0
+        net_text=text.split("NETS ",1)[1].split("END NETS",1)[0]
+        for name,body in re.findall(r"-\s+(\S+)\s+(.*?);",net_text,re.S):
+            for instance,pname in re.findall(r"\(\s*(\S+)\s+(\S+)\s*\)",body):
+                if instance=="PIN":continue
+                macro,x,y,orient=components[instance];pins,w,h=macros[macro]
+                px,py,layer=pins[pname]
+                px,py={'N':(px,py),'S':(w-px,h-py),'E':(py,w-px),'W':(h-py,px),
+                       'FN':(w-px,py),'FS':(px,h-py),'FW':(py,px),'FE':(h-py,w-px)}[orient]
+                px,py=x+px*dbu,y+py*dbu
+                self.assertTrue(any(r[4]==layer and r[0]<=px<=r[2] and r[1]<=py<=r[3]
+                                    for r in guide[name]),f"missing real PIN {name}/{instance}.{pname}")
+                count+=1
+        self.assertGreater(count,400)
 
     def test_movable_fixture_accepts_candidates_and_rolls_back_later_trials(self):
         # A synthetic derivative enables movement by removing only the six

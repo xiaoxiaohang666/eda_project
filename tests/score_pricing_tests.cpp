@@ -1,3 +1,4 @@
+#include <regex>
 #include "router/negotiated_router.hpp"
 #include <filesystem>
 #include <fstream>
@@ -96,6 +97,20 @@ struct PinLocalTestAccess {
         near(router.official_congestion_price(),1,"physical model ignores official score pricing");
         require(router.pricing_updates_==updates,"physical model does not refresh the official price cache");
         require(router.congestion_price_min_==.01 && router.congestion_price_max_==10000,"reported price bounds reflect actual clipped queries");
+        router.options_.official_model=true;router.options_.congestion_price_cap=1e9;
+        state(router,1000000,1e8L,1000000,0);
+        require(router.official_congestion_price()>10000,"higher experimental ceiling preserves previously compressed prices");
+        router.options_.congestion_price_cap=10000;
+        router.options_.score_unit_cost=true;
+        state(router,1000000,1400000,1000000,.3L);
+        const int n=router.graph_.node(1,0,1);
+        router.demand_[n]=20;router.present_=1;router.guide_history_[n]=0;
+        const long double dq=.01L*(1.1L*1.1L-1);
+        near(router.official_cell_search_cost(n),30/std::sqrt(1.3L)-30/std::sqrt(1.3L+dq),
+            "score-unit congestion cost equals independent finite C loss",2e-10L);
+        near(router.official_search_scale(),45e6L*router.graph_.ell0()/(1400000.0L*1400000),
+            "score-unit length scale is weighted W derivative per ell0");
+        router.demand_[n]=0;router.options_.score_unit_cost=false;
     }
     static void generation(NegotiatedRouter& router) {
         state(router,1000000,0,0,0);
@@ -157,6 +172,16 @@ struct PinLocalTestAccess {
         near(dijkstra.cost,4,"independent grid detour avoids the expensive direct corridor");
         require(router.state_generation_==generation && router.pricing_updates_==updates,"search snapshots reuse one price without ledger mutation");
     }
+    static void zero_capacity_policy(NegotiatedRouter& router) {
+        const int node=router.graph_.node(0,0,1);
+        require(router.graph_.documented_rules() && router.graph_.official_capacity(node)==0,"documented zero-track fixture");
+        router.options_.official_model=true;
+        for(bool score_units:{false,true}) for(int already_used:{0,1,7}) {
+            router.options_.score_unit_cost=score_units;router.demand_[node]=already_used;
+            require(std::isinf(router.official_cell_search_cost(node)),
+                    "occupied zero-capacity cells never become free marginal routing resources");
+        }
+    }
     static void constructor_reference(const NegotiatedRouter& router) {
         const long double total=std::accumulate(router.reference_lengths_.begin(),router.reference_lengths_.end(),0.0L);
         require(total>0,"native fixture has positive exact FLUTE reference");
@@ -177,6 +202,13 @@ int main(int argc,char** argv) {
         NegotiatedRouter router(def,lef,thermal,options);
         PinLocalTestAccess::algebra(router);PinLocalTestAccess::generation(router);
         PinLocalTestAccess::costs_and_search(router);
+        DefParser zero_def;
+        require(zero_def.parse(write(dir/"zero-pricing.def",std::regex_replace(design(),std::regex("TRACKS[^;]*;"),"")),lef,
+                               DefGridMapping::OFFICIAL_FULL),"zero-track pricing DEF parses");
+        RouterOptions zero_options;zero_options.graph_options={RoutingGeometryMode::GLOBAL_GUIDE,false,true,false,true};
+        NegotiatedRouter zero_router(zero_def,lef,thermal,zero_options);
+        PinLocalTestAccess::zero_capacity_policy(zero_router);
+
         if (argc==3) {
             const fs::path runtime=argv[2];bool available=true;
             for (const auto* name:{"libflute.so","tse_framework_pybind_flute.cpython-310-x86_64-linux-gnu.so","POWV9.dat","POST9.dat"})

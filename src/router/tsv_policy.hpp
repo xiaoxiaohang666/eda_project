@@ -1,9 +1,11 @@
 #pragma once
 #include "router/routing_graph.hpp"
 #include "parser/thermal_parser.hpp"
+#include <memory>
+#include <chrono>
 
 namespace eda {
-enum class TsvResourceMode { AUTO, PAIRED, PROJECTED };
+enum class TsvResourceMode { AUTO, PAIRED, PROJECTED, GLOBAL_GRID };
 struct TsvPolicyOptions {
     TsvResourceMode resource_mode{TsvResourceMode::AUTO};
     size_t nearest_candidates{8};
@@ -47,6 +49,8 @@ struct SlotCandidate {
 // the global projection of real reservations and explicit VIA/OBS geometry.
 // One TSV/net and one net/reservation remain conservative engineering policies;
 // neither this projection nor the nearest-candidate heuristic is official DRC.
+// Explicit GLOBAL_GRID uses one abstract M10/M11 Guide landing per GCell,
+// without interpreting placement reservations as global-routing restrictions.
 class TsvPolicy {
 public:
     // Geometry-free policy bound. Call before graph allocation on large inputs.
@@ -57,6 +61,7 @@ public:
     int slot_capacity(int) const { return 1; }
     int net_tsv_count(const Net& net) const { return net.is_cross_die ? 1 : 0; }
     const char* pairing_mode() const {
+        if (options_.resource_mode==TsvResourceMode::GLOBAL_GRID) return "global-grid";
         return projected_ ? "resource-projection-via-geometry" : "transformed-port-center";
     }
     const char* assignment_mode() const {
@@ -91,7 +96,8 @@ public:
     size_t assignment_global_completions() const { return assignment_global_completions_; }
     double assignment_max_displacement_dbu() const { return assignment_max_displacement_dbu_; }
     bool compatible(const Net& net, int slot) const;
-    std::vector<int> assign(const std::vector<Net>& nets, const ThermalParser& thermal) const;
+    std::vector<int> assign(const std::vector<Net>& nets, const ThermalParser& thermal,
+        std::chrono::steady_clock::time_point deadline=std::chrono::steady_clock::time_point::max()) const;
     bool validate_mapping(const Net& net, const std::vector<GuideRect>& guides,
                           int slot, std::string& error) const;
 private:
@@ -102,6 +108,9 @@ private:
     TsvPolicyOptions options_;
     bool projected_{false};
     std::vector<bool> enabled_;
+    // Only GLOBAL_GRID populates this compact cell -> candidate lookup. Fixed
+    // interface pins need their containing cell, not an exact center match.
+    std::vector<int> global_cell_slots_;
     mutable size_t assignment_candidate_edges_{0}, assignment_expansions_{0};
     mutable size_t assignment_global_completions_{0};
     mutable double assignment_max_displacement_dbu_{0};
@@ -116,9 +125,47 @@ private:
     mutable long long assignment_block_cost_reduction_{0};
     mutable bool assignment_block_budget_exhausted_{false};
     mutable double assignment_block_seconds_{0};
+    mutable std::chrono::steady_clock::time_point assignment_deadline_{std::chrono::steady_clock::time_point::max()};
     void refine_occupied_blocks(const std::vector<Net>& nets, const std::vector<int>& cross,
                                 const std::vector<Point>& anchors, std::vector<int>& chosen) const;
     std::vector<int> assign_projected(const std::vector<Net>& nets,
                                      const ThermalParser& thermal) const;
+};
+
+// Bounded, deterministic proposals for post-route joint TSV/routing trials.
+// Scores use 0..100 weighted quality units; this is only a shortlist proxy.
+struct TsvMoveSearchOptions {
+    // Upper bounds; an internal quadratic-work cap can shorten/skip queries.
+    size_t max_candidates{16}, max_pins{128};
+    double length_price{0.0}; // Positive weighted-quality cost per DBU.
+    double thermal_gain{20.0}, risk_price{0.0};
+};
+struct TsvMoveCandidate {
+    int slot{-1};
+    double correlation_after{};
+    double proxy_length_delta_dbu{};
+    double thermal_score_delta{}; // Exact 0.25 * delta(T), in quality points.
+    double estimated_score_delta{};
+};
+class TsvMoveSearch {
+public:
+    // All referenced design objects must outlive this context. The assignment
+    // is copied, includes all net indices, and must contain one unique slot per
+    // cross-die net and -1 for each same-die net. GLOBAL_GRID only.
+    TsvMoveSearch(const DefParser&, const RoutingGraph&, const TsvPolicy&,
+                  const ThermalParser&, const std::vector<int>& assignment);
+    ~TsvMoveSearch();
+    TsvMoveSearch(const TsvMoveSearch&) = delete;
+    TsvMoveSearch& operator=(const TsvMoveSearch&) = delete;
+    std::vector<TsvMoveCandidate> candidates(size_t net_index,
+                                            const TsvMoveSearchOptions& options = {}) const;
+    double current_correlation() const;
+    int current_slot(size_t net_index) const;
+    // Call only after a fully routed, encoded, validated move is accepted.
+    // An invalid/occupied destination leaves every context field unchanged.
+    bool commit_move(size_t net_index, int new_slot);
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
 };
 } // namespace eda

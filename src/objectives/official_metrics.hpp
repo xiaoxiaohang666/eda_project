@@ -15,6 +15,10 @@ struct OfficialMetricOptions {
     // Exact first GCELLGRID statement STEP, including clipped boundary cells.
     double gcell_width_dbu{0.0};
     double gcell_height_dbu{0.0};
+    bool score_20261020{false}; // Platform wirelength score and own-pin exemption.
+    // Opt-in documented landing-cell resource estimate. The graph overload
+    // merges this net's Guide with the physical TSV track reservation.
+    bool tsv_track_demand{false};
 };
 struct NativeFluteResult {
     double wirelength_dbu{0.0};
@@ -51,16 +55,34 @@ private:
     std::shared_ptr<Impl> impl_;
 };
 
-// The archived program chooses gain by the original DEF basename.
-// Unknown basenames use the official default 20.0.
+// Historical diagnostic helper only; production routing never calls it.
+// The published text does not provide this table or filename selection rule.
 double official_thermal_gain_for_def_file(const std::string& def_path);
 
-// Serial-guide metric: clip/deduplicate/containment pruning, GCell-set planar
-// length, ordinary via counting, and selected unique M10/M11 TSV. reference_dbu
+// Shared score in [0,100] for final measurement and candidate comparisons.
+// The October 20 profile requires a positive total reference and rewards
+// every nonnegative length <= reference with 100. Historical tent stays default.
+double official_wirelength_score(double length_dbu, double reference_dbu,
+                                 const OfficialMetricOptions& options);
+
+// Submitted-guide metric: reject malformed/out-of-DIE geometry, deduplicate only
+// planar GCells, charge each adjacent-layer rectangle, and select M10/M11 TSV. reference_dbu
 // is the caller's cached exact FLUTE cost; it must not be a guide bbox proxy.
 NetGuideMetrics measure_official_net_guides(const Net& net,
                                           const std::vector<GuideRect>& guides,
                                           const RoutingGraph& graph,
+                                          const LefParser& lef,
+                                          const OfficialMetricOptions& options,
+                                          double reference_dbu);
+// Geometry-only overload for independent scorers. Requires an already
+// validated GCell grid, but no routing graph or positive track capacities.
+// Node IDs retain the RoutingGraph layer/row/column layout.
+// This overload leaves demand unmasked; independent scorers apply their own
+// resource pin policy. The graph overload applies the selected profile's mask.
+NetGuideMetrics measure_official_net_guides(const Net& net,
+                                          const std::vector<GuideRect>& guides,
+                                          const GCellGrid& grid,
+                                          const Rect& die,
                                           const LefParser& lef,
                                           const OfficialMetricOptions& options,
                                           double reference_dbu);

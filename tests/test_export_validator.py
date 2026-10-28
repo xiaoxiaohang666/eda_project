@@ -166,6 +166,23 @@ for extra in (("--model", "official"), ("--strict-obs", "0")):
     assert value["errors"]["connectivity"] > 0
     assert value["errors"]["pins"] == 0
     checks += 2
+# Official preferred-direction connectivity is mandatory even without the
+# October 20 scoring option. A dangling Guide in an adjacent track band must
+# not become connected just because a transverse edge touches another Guide.
+for rectangle, expected in (
+        ("104 108 108 112 metal1", 1),  # H layer, only transverse Y contact
+        ("108 104 112 108 metal2", 1),  # V layer, only transverse X contact
+        ("108 104 112 108 metal1", 0),  # H layer, legal longitudinal X contact
+        ("104 108 108 112 metal2", 0)): # V layer, legal longitudinal Y contact
+    for first in (False, True):
+        original = official_valid.splitlines()[2:-1]
+        rectangles = ([rectangle] + original) if first else (original + [rectangle])
+        contents = "n0\n(\n" + "\n".join(rectangles) + "\n)\n"
+        value = run(expected, contents=contents, extra=("--model", "official"))
+        assert value["errors"]["pins"] == 0
+        assert (value["errors"]["connectivity"] > 0) == bool(expected)
+        checks += 2
+
 run(2, extra=("--model", "unknown"))
 run(2, extra=("--model", "official", "--strict-obs", "1"))
 run(2, extra=("--strict-obs", "1", "--model", "official"))

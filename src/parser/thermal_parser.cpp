@@ -122,9 +122,10 @@ struct RegularField {
 
 bool ThermalParser::parse_json(const std::string& json_file_path, const GCellGrid& grid,
                                double dbu_per_micron, const Rect& die_area,
-                               ThermalMapping mapping) {
+                               ThermalMapping mapping, bool capture_node_counts) {
     ambient_ = 25.0;
     heat_matrix_.clear();
+    node_counts_.clear();
     hotspots_.clear();
     interpolated_cells_ = 0;
     filled_cells_ = 0;
@@ -289,6 +290,7 @@ bool ThermalParser::parse_json(const std::string& json_file_path, const GCellGri
         });
         ambient_ = ambient;
         heat_matrix_ = std::move(heat);
+        if (capture_node_counts) node_counts_ = std::move(counts);
         hotspots_ = std::move(hotspots);
         filled_cells_ = missing_cells;
         interpolated_cells_ = mapping == ThermalMapping::LEGACY_BILINEAR ? missing_cells : 0;

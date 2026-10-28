@@ -170,7 +170,7 @@ class V3Tests(unittest.TestCase):
                 before_points = points
             else:
                 self.assertEqual(points, before_points, "fixed interface apertures must stay unchanged")
-        oracle.AlgorithmTests.test_package_checker_points_are_covered_without_replacing_real_pins(self)
+        oracle.AlgorithmTests.test_actual_oriented_pin_centers_are_covered(self)
         oracle.AlgorithmTests.test_fixed_pins_and_planned_slots_match_every_inferred_tsv(self)
 
     def test_stage_changes_only_fixed_cross_die_nets(self):

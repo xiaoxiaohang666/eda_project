@@ -122,6 +122,14 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual(Path(copied_thermal["copy"]).name, "open_3d_case003.thermal.input.json")
         self.assertNotEqual(copied_def["source"], copied_def["copy"])
 
+    def test_mixed_score_contracts_are_rejected(self):
+        baseline={'scoring_model':'documented-20261020','rules_contract':'documented-rules-v1',
+                  'resource_profile':'documented','thermal_gain':20,'metrics':{'quality':0.5}}
+        for key,value in [('scoring_model','official-2026'),('rules_contract','historical'),
+                          ('resource_profile','platform-20261024'),('thermal_gain',3)]:
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError,key):
+                benchmark.comparison(baseline,dict(baseline,**{key:value}))
+
     def test_nonzero_and_timeout_never_pass(self):
         for mode in ("nonzero", "timeout"):
             with self.subTest(mode=mode):

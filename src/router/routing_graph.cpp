@@ -1,4 +1,5 @@
 #include "router/routing_graph.hpp"
+#include "scoring/compat_resources.hpp"
 
 #include <limits>
 #include <set>
@@ -68,6 +69,15 @@ bool same_die(int a, int b) { return (a <= 10) == (b <= 10); }
 
 RoutingGraph::RoutingGraph(const DefParser& def, const LefParser& lef, RoutingGraphOptions options)
     : options_(options), grid_(def.gcell_grid()), die_(def.die_area()), dbu_(def.dbu_per_micron()) {
+    if (options_.documented_rules && (!options_.score_20261020 || options_.platform_20261024))
+        throw std::runtime_error("documented resources require the October 20 profile without historical platform overrides");
+    if (options_.platform_20261024 && !options_.score_20261020)
+        throw std::runtime_error("platform resources require the October 20 scoring profile");
+    if (options_.score_20261020) {
+        if (!global_guide_mode())
+            throw std::runtime_error("October 20 scoring profile requires GLOBAL_GUIDE geometry mode");
+        options_.allow_nonpreferred = false;
+    }
     if (!grid_.valid() || dbu_ <= 0) throw std::runtime_error("routing graph requires a valid DEF grid");
     plane_ = static_cast<size_t>(grid_.cols) * static_cast<size_t>(grid_.rows);
     if (plane_ > static_cast<size_t>(std::numeric_limits<int>::max()) / 20)
@@ -106,7 +116,7 @@ RoutingGraph::RoutingGraph(const DefParser& def, const LefParser& lef, RoutingGr
         }
         const int physical_axis = directions_[l] == Direction::HORIZONTAL ? 1 : 0;
         const int scorer_axis = 1 - physical_axis;
-        if (physical_tracks_[l][physical_axis].empty())
+        if (physical_tracks_[l][physical_axis].empty() && !score_20261020())
             throw std::runtime_error("routing graph needs preferred-direction physical TRACKS for " + get_layer_name(l));
         physical_guide_mode_[l] = global_guide_mode() || scorer_tracks_[l][scorer_axis].empty();
         guide_axes_[l] = physical_guide_mode_[l] ? physical_axis : scorer_axis;
@@ -123,7 +133,16 @@ RoutingGraph::RoutingGraph(const DefParser& def, const LefParser& lef, RoutingGr
             capacities[i] = static_cast<double>(count_interval(values, lines[i], lines[i + 1], i + 1 == capacities.size()));
     }
     if(global_guide_mode()) {
-        build_official_resources(def,lef);
+        if(score_20261020()) {
+            // The published rules count occupancy on the shape's actual layer
+            // and physical tracks as a set. Historical scorer conventions are
+            // retained solely for offline compatibility diagnostics.
+            const compat::ResourceOptions resources = documented_rules()
+                ? compat::ResourceOptions{false,true,false}
+                : compat::ResourceOptions{true,false,platform_resources()};
+            updated_resources_=std::make_shared<compat::Resources>(def,lef,resources);
+        }
+        else build_official_resources(def,lef);
         legal_.assign(20*plane_,1);via_up_.assign(size(),0);planar_forward_.assign(size(),0);
         for(int id=0;id<static_cast<int>(size());++id) {
             const auto box=cell(id);
@@ -309,16 +328,52 @@ void RoutingGraph::build_official_resources(const DefParser& def,const LefParser
 double RoutingGraph::official_capacity(int id) const {
     if(!global_guide_mode()) throw std::logic_error("official capacity requires GLOBAL_GUIDE geometry mode");
     if(!valid_id(id)) throw std::out_of_range("invalid official capacity node");
+    if(updated_resources_) return updated_resources_->capacity(id);
     const int l=layer(id);return official_capacity_[l][directions_[l]==Direction::HORIZONTAL?row(id):col(id)];
+}
+int RoutingGraph::tsv_landing_tracks(Point point,int l,double width_um) const {
+    if(!global_guide_mode() || !score_20261020() || !documented_rules())
+        throw std::logic_error("TSV track reservation requires documented October 20 GLOBAL_GUIDE resources");
+    if(l!=10 && l!=11) throw std::out_of_range("TSV track reservation requires metal10 or metal11");
+    if(!std::isfinite(point.x) || !std::isfinite(point.y) || !die_.contains(point) ||
+       !std::isfinite(width_um) || width_um<=0 || !std::isfinite(width_um*dbu_))
+        throw std::invalid_argument("invalid TSV landing point or physical width");
+    const int c=grid_.get_col(point.x),r=grid_.get_row(point.y);
+    if(c<0 || r<0) throw std::out_of_range("TSV landing is outside GCell grid");
+    const bool horizontal=directions_[l]==Direction::HORIZONTAL;
+    const int axis=horizontal?1:0;
+    const auto& lines=horizontal?grid_.y_lines:grid_.x_lines;
+    const size_t band=size_t(horizontal?r:c);
+    const auto& tracks=physical_tracks_[l][axis];
+    const double center=horizontal?point.y:point.x,half=0.5*width_um*dbu_;
+    const double low=std::max({center-half,lines[band],horizontal?die_.y1:die_.x1});
+    const double high=std::min({center+half,lines[band+1],horizontal?die_.y2:die_.x2});
+    if(high<low) return 0;
+    const auto begin=std::lower_bound(tracks.begin(),tracks.end(),low);
+    // Follow the existing documented fixed-shape rule: include a physical
+    // shape's high edge unless it is an internal capacity-band boundary.
+    const auto end=(high==lines[band+1] && band+2<lines.size())
+        ? std::lower_bound(tracks.begin(),tracks.end(),high)
+        : std::upper_bound(tracks.begin(),tracks.end(),high);
+    const size_t count=size_t(end-begin);
+    const double cap=official_capacity(node(c,r,l));
+    if(!std::isfinite(cap) || cap<0 || cap>double(std::numeric_limits<int>::max()))
+        throw std::runtime_error("invalid TSV landing capacity");
+    return int(std::min(count,size_t(cap)));
 }
 uint32_t RoutingGraph::official_obstacle_demand(int id) const {
     if(!global_guide_mode()) throw std::logic_error("official obstacle demand requires GLOBAL_GUIDE geometry mode");
     if(!valid_id(id)) throw std::out_of_range("invalid official obstacle node");
+    if(updated_resources_) return updated_resources_->fixed_demand(id);
     return official_obstacle_demand_[id];
 }
 const std::vector<uint32_t>& RoutingGraph::official_obstacle_demands() const {
     if(!global_guide_mode()) throw std::logic_error("official obstacle demand requires GLOBAL_GUIDE geometry mode");
+    if(updated_resources_) return updated_resources_->fixed_demands();
     return official_obstacle_demand_;
+}
+std::vector<int> RoutingGraph::own_pin_nodes(const Net& net) const {
+    return updated_resources_ ? updated_resources_->pin_nodes(net) : std::vector<int>{};
 }
 
 bool RoutingGraph::valid_id(int id) const { return id >= 0 && static_cast<size_t>(id) < size(); }

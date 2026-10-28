@@ -26,13 +26,13 @@ int main(int argc,char**argv){try{
     RoutingGraph graph(def,lef,RoutingGraphOptions{RoutingGeometryMode::GLOBAL_GUIDE});
     OfficialMetricOptions o;o.gcell_width_dbu=100;o.gcell_height_dbu=100;o.thermal_gain=2;
     const auto& net=def.nets().front();
-    const std::vector<GuideRect> pad{{45,45,55,55,"metal10"},{45,45,55,55,"metal11"},{45,45,55,55,"metal10"}};
+    const std::vector<GuideRect> pad{{45,45,55,55,"metal10"},{45,45,55,55,"metal11"}};
     const auto one=measure_official_net_guides(net,pad,graph,lef,o,1000);
     near(one.wirelength,800,"two GCells plus original TSV ratio cost");
     require(one.demand.size()==2 && one.demand[0].second==2 && one.demand[1].second==2,"guide dedup plus one TSV demand on each layer");
     require(one.tsv_cells==std::vector<int>{0},"single selected TSV cell");
     const auto contained=measure_official_net_guides(net,{{45,45,55,55,"metal10"},{47,47,53,53,"metal10"},{45,45,55,55,"metal11"}},graph,lef,o,1000);
-    near(contained.wirelength,800,"contained guides do not add via or GCell demand");
+    near(contained.wirelength,1400,"every submitted lower rectangle pays a cross-layer cost; only planar cells deduplicate");
     std::vector<int> demand(graph.size());for(auto[n,d]:one.demand)demand[n]+=d;
     const auto total=aggregate_official_metrics({&one},demand,graph,heat,o,true);
     near(total.wirelength_score,80,"sub-baseline length is penalized by L, not rewarded");
@@ -50,6 +50,20 @@ int main(int argc,char**argv){try{
     const auto planar=measure_official_net_guides(local,{{45,45,155,55,"metal1"},{145,45,255,55,"metal1"}},graph,lef,o,500);
     near(planar.wirelength,300,"overlapping guide rectangles cover three unique GCells");
     require(planar.demand.size()==3 && std::all_of(planar.demand.begin(),planar.demand.end(),[](auto x){return x.second==1;}),"one demand per net/layer/cell");
+    // Two distinct lower-layer strips occupy the same GCell but both need a
+    // connection to the upper strip. Planar dedup must not erase either via.
+    std::vector<GuideRect> vias{{0,0,100,40,"metal1"},{0,60,100,100,"metal1"},{40,0,60,100,"metal2"}};
+    const auto charged=measure_official_net_guides(local,vias,graph,lef,o,500);
+    near(charged.wirelength,800,"same-cell lower rectangles retain both via charges");
+    std::reverse(vias.begin(),vias.end());
+    near(measure_official_net_guides(local,vias,graph,lef,o,500).wirelength,charged.wirelength,
+         "rectangle order cannot change the documented charge");
+    vias.push_back(vias.back());
+    require(measure_official_net_guides(local,vias,graph,lef,o,500).wirelength>=charged.wirelength,
+            "redundant geometry cannot reduce measured cost");
+    rejects([&]{measure_official_net_guides(local,{{-1,0,100,100,"metal1"}},graph,lef,o,500);},
+            "measurement cannot silently trim an out-of-DIE rectangle");
+
     const std::vector<GuideRect> two{{45,45,55,55,"metal10"},{45,45,55,55,"metal11"},{245,45,255,55,"metal10"},{245,45,255,55,"metal11"},{45,45,255,55,"metal9"},{45,45,255,55,"metal12"}};
     const auto two_result=measure_official_net_guides(net,two,graph,lef,o,1000);
     require(two_result.tsv_points.size()==1 && two_result.tsv_points.front().x==250 && two_result.tsv_points.front().y==50,"two candidates select the one not intersecting all interface pin boxes");

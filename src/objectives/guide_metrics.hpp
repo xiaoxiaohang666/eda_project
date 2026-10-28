@@ -11,6 +11,9 @@ struct NetGuideMetrics {
     std::vector<Point> tsv_points;
     double wirelength{0.0};
     double reference{0.0};
+    // Diagnostic decomposition of the same submitted-Guide charge.
+    double planar_wirelength{0.0}, via_wirelength{0.0}, tsv_wirelength{0.0};
+    size_t ordinary_connections{}, tsv_connections{};
     bool connected{true};
 };
 struct GuideMetrics {

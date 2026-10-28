@@ -1,6 +1,8 @@
 #include "router/routing_graph.hpp"
 #include "router/tsv_policy.hpp"
 #include "validation/guide_validator.hpp"
+#include "scoring/compat_validation.hpp"
+#include "validation/gcell_encoding.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -22,6 +24,7 @@ struct Options {
     std::vector<std::string> lefs;
     std::string def, thermal, guide, report;
     bool official_model{false}, strict_obs{true}, strict_obs_explicit{false};
+    bool score_20261020{false};
     TsvPolicyOptions tsv;
 };
 std::string quoted(const std::string& value) {
@@ -39,8 +42,9 @@ Options options(int argc, char** argv) {
         const std::string key = argv[i];
         if (key == "--help") {
             std::cout << "eda_validate_guide --lef FILE (repeatable) --def FILE --thermal FILE --guide FILE\n"
-                      << "  [--model physical|official] [--tsv-resources auto|paired|projected]\n"
+                      << "  [--model physical|official] [--tsv-resources auto|paired|projected|global-grid]\n"
                       << "  [--strict-obs 0|1] [--report JSON]\n"
+                      << "  [--score-profile legacy-20261011|20261020]\n"
                       << "Physical defaults to strict OBS. Official uses full DEF grids and OBS/PIN capacity demand;\n"
                       << "  explicit --strict-obs 1 conflicts with --model official. Pin/TSV checks remain mandatory.\n"
                       << "Checks oriented terminals, Guide connectivity, DIE/OBS and engineering TSV mapping.\n"
@@ -54,6 +58,10 @@ Options options(int argc, char** argv) {
         else if (key == "--thermal") result.thermal = value;
         else if (key == "--guide") result.guide = value;
         else if (key == "--report") result.report = value;
+        else if (key == "--score-profile") {
+            if(value!="legacy-20261011" && value!="20261020") throw std::runtime_error("invalid score profile");
+            result.score_20261020=value=="20261020";
+        }
         else if (key == "--model") {
             if (value != "physical" && value != "official") throw std::runtime_error("model must be physical or official");
             result.official_model = value == "official";
@@ -66,9 +74,14 @@ Options options(int argc, char** argv) {
             if (value == "auto") result.tsv.resource_mode = TsvResourceMode::AUTO;
             else if (value == "paired") result.tsv.resource_mode = TsvResourceMode::PAIRED;
             else if (value == "projected") result.tsv.resource_mode = TsvResourceMode::PROJECTED;
+            else if (value == "global-grid") result.tsv.resource_mode = TsvResourceMode::GLOBAL_GRID;
             else throw std::runtime_error("unknown TSV resource mode: " + value);
         } else throw std::runtime_error("unknown option: " + key);
     }
+    if(result.score_20261020 && !result.official_model)
+        throw std::runtime_error("20261020 score profile requires --model official");
+    if(result.tsv.resource_mode==TsvResourceMode::GLOBAL_GRID && !result.official_model)
+        throw std::runtime_error("global-grid TSV resources require --model official");
     if (result.official_model) {
         if (result.strict_obs_explicit && result.strict_obs)
             throw std::runtime_error("--strict-obs 1 conflicts with --model official: OBS/PIN are capacity demand in the global-Guide model");
@@ -132,6 +145,7 @@ struct Results {
     size_t pin_errors{}, connectivity_errors{}, geometry_errors{}, mapping_errors{}, fallback_layers{}, interpolated_cells{};
     size_t guide_envelope_obs_intersections{}, pin_port_precedence_rectangles{};
     bool official_model{false}, strict_obs{true};
+    bool score_20261020{false};
     size_t grid_rows{}, grid_cols{};
     std::string thermal_mode, tsv_mode, capacity_model;
     std::vector<std::string> examples;
@@ -142,10 +156,13 @@ struct Results {
 std::string report(const Results& result) {
     std::ostringstream out;
     out << "{\n\"status\":" << quoted(result.errors ? "FAIL" : "PASS")
+        << ",\n\"score_profile\":" << quoted(result.score_20261020?"20261020":"legacy-20261011")
         << ",\n\"validation_scope\":" << quoted(result.official_model
             ? "reloaded-export-oriented-pin-connectivity-die-global-guide-engineering-tsv-policy"
             : "reloaded-export-oriented-pin-connectivity-die-obs-engineering-tsv-policy")
         << ",\n\"official_evaluator_status\":\"not_run\",\n\"full_drc_certified\":false"
+        << ",\n\"gcell_encoding_enforced\":" << (result.official_model && result.tsv_mode=="global-grid" ? "true" : "false")
+        << ",\n\"unpublished_platform_compatibility\":\"unverified; use audit_guide_geometry.py for observed-rule and unresolved-boundary reporting\""
         << ",\n\"strict_obs_enforced\":" << (result.strict_obs ? "true" : "false")
         << ",\n\"guide_envelope_obs_intersections\":" << result.guide_envelope_obs_intersections
         << ",\n\"pin_port_precedence_rectangles\":" << result.pin_port_precedence_rectangles
@@ -188,12 +205,20 @@ int main(int argc, char** argv) {
         ThermalParser thermal;
         if (!thermal.parse_json(config.thermal, def.gcell_grid(), def.dbu_per_micron(), def.die_area(),
             config.official_model ? ThermalMapping::OFFICIAL_PREVIOUS : ThermalMapping::LEGACY_BILINEAR)) return 2;
-        const auto guides = read_guide(config.guide);
+        const auto guides = config.score_20261020?compat::read_guides(config.guide):read_guide(config.guide);
         RoutingGraphOptions graph_options;
+        graph_options.score_20261020=config.score_20261020;
         if (config.official_model) graph_options.geometry = RoutingGeometryMode::GLOBAL_GUIDE;
+        TsvPolicy::preflight(def, lef, config.tsv);
         RoutingGraph graph(def, lef, graph_options); TsvPolicy policy(def, lef, graph, config.tsv);
         Results result; result.thermal_mode = thermal.mapping_mode(); result.tsv_mode = policy.pairing_mode();
         result.official_model = config.official_model; result.strict_obs = config.strict_obs;
+        result.score_20261020=config.score_20261020;
+        if(config.score_20261020) {
+            const auto checked=compat::validate(def,lef,guides);
+            result.errors+=checked.error_count;result.geometry_errors+=checked.error_count;
+            result.examples=checked.errors;
+        }
         result.grid_rows = graph.grid().rows; result.grid_cols = graph.grid().cols;
         result.capacity_model = graph.capacity_model();
         result.interpolated_cells = thermal.interpolated_cells();
@@ -209,6 +234,11 @@ int main(int argc, char** argv) {
             auto found = guides.find(net.name);
             if (found == guides.end()) { result.fail(net.name + ": missing exported net", result.connectivity_errors); continue; }
             const auto& rects = found->second;
+            if(config.official_model && config.tsv.resource_mode==TsvResourceMode::GLOBAL_GRID) {
+                std::string error;
+                if(!validate_gcell_encoding(net,def.die_area(),graph.grid(),lef,rects,error))
+                    result.fail(error,result.geometry_errors);
+            }
             std::array<std::vector<size_t>, 21> by_layer; bool valid = true;
             for (size_t i = 0; i < rects.size(); ++i) {
                 const auto& rect = rects[i]; ++result.checked_rectangles; const int layer = get_layer_index(rect.layer);
@@ -265,11 +295,14 @@ int main(int argc, char** argv) {
                         if (next == layer && b <= a) continue;
                         const double dx = std::min(rects[a].x2, rects[b].x2) - std::max(rects[a].x1, rects[b].x1);
                         const double dy = std::min(rects[a].y2, rects[b].y2) - std::max(rects[a].y1, rects[b].y1);
-                        // Integer DBU make the official 1e-6 same-layer
-                        // tolerance equivalent to >0; vias need positive area.
-                        const bool contact = layer == next
-                            ? dx >= 0 && dy >= 0 && (dx > 0 || dy > 0)
-                            : dx > 0 && dy > 0;
+                        // The written rule only connects same-layer Guides
+                        // along the preferred direction. Side contact between
+                        // adjacent track bands must not bridge those bands.
+                        const bool same_layer_contact = config.official_model
+                            ? (lef.get_layer_direction(get_layer_name(layer)) == Direction::HORIZONTAL
+                                ? dx >= 0 && dy > 0 : dy >= 0 && dx > 0)
+                            : dx >= 0 && dy >= 0 && (dx > 0 || dy > 0);
+                        const bool contact = layer == next ? same_layer_contact : dx > 0 && dy > 0;
                         if (contact) connected.join(a, b);
                     }
             // Physical geometry can connect through existing terminal metal.

@@ -123,8 +123,8 @@ def stats_summary(path):
     stats = read_json(path)
     if not isinstance(stats, dict) or not isinstance(stats.get("metrics"), dict):
         raise ValueError("stats must be an object containing metrics")
-    if stats.get("scoring_model", "official-2026") != "official-2026":
-        raise ValueError("baseline and candidate must use the official-2026 model")
+    if stats.get("scoring_model", "official-2026") not in ("official-2026", "documented-20261020"):
+        raise ValueError("baseline and candidate must use an identified documented/legacy diagnostic model")
     if any(not numeric(stats["metrics"].get(key)) for key in SCORE_FIELDS):
         raise ValueError("stats require finite numeric W/C/T scores and quality")
     for key in ("initial_metrics", "pre_recovery_metrics", "pre_tsv_local_metrics", "budgeted_wirelength_recovery",
@@ -135,12 +135,16 @@ def stats_summary(path):
         if key in stats and (not numeric(stats[key]) or stats[key] < 0):
             raise ValueError(f"stats field {key} must be finite and nonnegative")
     fields = ("scoring_model", "geometry_model", "guide_encoding", "large_design_schedule",
+              "rules_contract", "resource_profile", "thermal_gain", "thermal_gain_source", "zero_capacity_routing_policy",
               "metrics", "initial_metrics", "pre_recovery_metrics", "pre_tsv_local_metrics", "budgeted_wirelength_recovery",
               "counters", "policy", "options", "peak_rss_kb", "elapsed_seconds")
     return {key: stats[key] for key in fields if key in stats}
 
 
 def comparison(baseline, candidate):
+    for key in ("scoring_model", "geometry_model", "rules_contract", "resource_profile", "thermal_gain", "zero_capacity_routing_policy"):
+        if baseline.get(key) != candidate.get(key):
+            raise ValueError(f"cannot compare different routing score contracts: {key}")
     result = {"delta_direction": "candidate minus baseline; quality is a fraction, W/C/T are scores"}
     groups = {
         "metrics": (baseline["metrics"], candidate["metrics"]),
@@ -355,7 +359,7 @@ def main(argv=None):
     parser.add_argument("--baseline-stats", type=Path)
     parser.add_argument("--validator", type=Path)
     parser.add_argument("--validator-timeout", type=positive_number, default=180)
-    parser.add_argument("--tsv-resource-mode", choices=("auto", "paired", "projected"), default="auto")
+    parser.add_argument("--tsv-resource-mode", choices=("auto", "paired", "projected", "global-grid"), default="auto")
     parser.add_argument("router_args", nargs=argparse.REMAINDER, help="additional router arguments after --")
     args = parser.parse_args(argv)
     try:

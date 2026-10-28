@@ -53,13 +53,52 @@ add_executable(eda_validate_guide scripts/validate_exported_guide.cpp)
 target_link_libraries(eda_validate_guide PRIVATE eda_core)
 set_target_properties(eda_validate_guide PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
+add_executable(eda_score_compat scripts/score_compat.cpp)
+target_link_libraries(eda_score_compat PRIVATE eda_core)
+set_target_properties(eda_score_compat PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(grid_local_tests tests/grid_local_tests.cpp)
+    target_link_libraries(grid_local_tests PRIVATE eda_core)
+    add_test(NAME grid_local COMMAND grid_local_tests "${CMAKE_CURRENT_BINARY_DIR}/grid-local-artifacts"
+        "${CMAKE_CURRENT_SOURCE_DIR}/output/runtime/official-flute")
+    add_executable(gcell_encoding_tests tests/gcell_encoding_tests.cpp)
+    target_link_libraries(gcell_encoding_tests PRIVATE eda_core)
+    add_test(NAME gcell_encoding COMMAND gcell_encoding_tests "${CMAKE_CURRENT_BINARY_DIR}/gcell-encoding-artifacts")
+    add_executable(v6_scoring_tests tests/v6_scoring_tests.cpp)
+    target_link_libraries(v6_scoring_tests PRIVATE eda_core)
+    add_test(NAME v6_scoring COMMAND v6_scoring_tests "${CMAKE_CURRENT_BINARY_DIR}/v6-scoring-artifacts")
+    add_executable(compat_net_validation_tests tests/compat_net_validation_tests.cpp)
+    target_link_libraries(compat_net_validation_tests PRIVATE eda_core)
+    add_test(NAME compat_net_validation COMMAND compat_net_validation_tests "${CMAKE_CURRENT_BINARY_DIR}/compat-net-validation-artifacts")
+    add_executable(v6_router_tests tests/v6_router_tests.cpp)
+    target_link_libraries(v6_router_tests PRIVATE eda_core)
+    add_test(NAME v6_router COMMAND v6_router_tests "${CMAKE_CURRENT_BINARY_DIR}/v6-router-artifacts"
+        "${CMAKE_CURRENT_SOURCE_DIR}/output/runtime/official-flute")
+endif()
+if(BUILD_TESTING)
+    add_executable(compat_resources_tests tests/compat_resources_tests.cpp)
+    target_link_libraries(compat_resources_tests PRIVATE eda_core)
+    add_test(NAME compat_resources COMMAND compat_resources_tests
+        "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/compat-resource-artifacts")
+    add_executable(compat_validation_tests tests/compat_validation_tests.cpp)
+    target_link_libraries(compat_validation_tests PRIVATE eda_core)
+    add_test(NAME compat_validation COMMAND compat_validation_tests
+        "${CMAKE_CURRENT_BINARY_DIR}/compat-validation-artifacts")
     add_executable(framework_tests tests/framework_tests.cpp)
     target_link_libraries(framework_tests PRIVATE eda_core)
     add_test(NAME framework COMMAND framework_tests
         "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/test-artifacts")
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    add_test(NAME observed_guide_geometry COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_audit_guide_geometry.py")
+    add_test(NAME score_compat_wrapper COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_score_compat_wrapper.py")
+    add_test(NAME score_compat_cli COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_score_compat.py" "$<TARGET_FILE:eda_score_compat>"
+        "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/score-compat-artifacts"
+        "${CMAKE_CURRENT_SOURCE_DIR}/output/runtime/official-flute")
     add_test(NAME cli COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cli.py" "$<TARGET_FILE:eda_router>")
     add_test(NAME evaluation_wrapper COMMAND "${Python3_EXECUTABLE}"
@@ -198,6 +237,10 @@ if(BUILD_TESTING)
 
     add_test(NAME v5_cli COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_v5_cli.py" "$<TARGET_FILE:eda_router>")
+    add_test(NAME v6_cli COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_v6_cli.py" "$<TARGET_FILE:eda_router>"
+        "$<TARGET_FILE:eda_score_compat>" "$<TARGET_FILE:eda_validate_guide>"
+        "${CMAKE_CURRENT_SOURCE_DIR}/output/runtime/official-flute")
     add_executable(tsv_assignment_v5_tests tests/tsv_assignment_v5_tests.cpp)
     target_link_libraries(tsv_assignment_v5_tests PRIVATE eda_core)
     add_test(NAME tsv_assignment_v5 COMMAND tsv_assignment_v5_tests
@@ -207,4 +250,61 @@ if(BUILD_TESTING)
     add_test(NAME v5_topology COMMAND v5_topology_tests
         "${CMAKE_CURRENT_BINARY_DIR}/v5-topology-artifacts"
         "${CMAKE_CURRENT_SOURCE_DIR}/output/runtime/official-flute")
+    add_executable(global_tsv_tests tests/global_tsv_tests.cpp)
+    target_link_libraries(global_tsv_tests PRIVATE eda_core)
+    add_test(NAME global_tsv COMMAND global_tsv_tests
+        "${CMAKE_CURRENT_BINARY_DIR}/global-tsv-artifacts")
+endif()
+
+# V7 refinement regressions use the same immutable local FLUTE runtime.
+if(BUILD_TESTING)
+    add_test(NAME v7_cli COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_v7_cli.py" "$<TARGET_FILE:eda_router>"
+        "$<TARGET_FILE:eda_score_compat>" "$<TARGET_FILE:eda_validate_guide>"
+        "${CMAKE_CURRENT_SOURCE_DIR}/output/runtime/official-flute")
+endif()
+
+if(BUILD_TESTING)
+    add_executable(v7_tsv_tests tests/v7_tsv_tests.cpp)
+    target_link_libraries(v7_tsv_tests PRIVATE eda_core)
+    add_test(NAME v7_tsv COMMAND v7_tsv_tests "${CMAKE_CURRENT_BINARY_DIR}/v7-tsv-artifacts")
+endif()
+
+if(BUILD_TESTING)
+    add_executable(v7_router_tests tests/v7_router_tests.cpp)
+    target_link_libraries(v7_router_tests PRIVATE eda_core)
+    add_test(NAME v7_router COMMAND v7_router_tests
+        "${CMAKE_CURRENT_BINARY_DIR}/v7-router-artifacts"
+        "${CMAKE_CURRENT_SOURCE_DIR}/output/runtime/official-flute")
+endif()
+
+if(BUILD_TESTING)
+    foreach(name hotspot_rrr dynamic_tsv tsv_rematch)
+        add_executable(${name}_tests tests/${name}_tests.cpp)
+        target_link_libraries(${name}_tests PRIVATE eda_core)
+        add_test(NAME ${name} COMMAND ${name}_tests "${CMAKE_CURRENT_BINARY_DIR}/${name}-artifacts"
+            "${CMAKE_CURRENT_SOURCE_DIR}/output/runtime/official-flute")
+    endforeach()
+    add_test(NAME v8_cli COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_v8_cli.py"
+        "$<TARGET_FILE:eda_router>" "$<TARGET_FILE:eda_score_compat>" "$<TARGET_FILE:eda_validate_guide>"
+        "${CMAKE_CURRENT_SOURCE_DIR}/output/runtime/official-flute")
+endif()
+
+if(BUILD_TESTING AND Python3_Interpreter_FOUND)
+    add_test(NAME v9_cli COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_v9_cli.py"
+        $<TARGET_FILE:eda_router> $<TARGET_FILE:eda_score_compat> $<TARGET_FILE:eda_validate_guide>
+        "${CMAKE_CURRENT_SOURCE_DIR}/output/runtime/official-flute")
+endif()
+
+# TSV landing resource and transaction regressions.
+if(BUILD_TESTING)
+    add_executable(tsv_track_demand_tests tests/tsv_track_demand_tests.cpp)
+    target_link_libraries(tsv_track_demand_tests PRIVATE eda_core)
+    add_test(NAME tsv_track_demand COMMAND tsv_track_demand_tests "${CMAKE_CURRENT_BINARY_DIR}/tsv-track-demand-artifacts")
+    add_executable(tsv_landing_candidates_tests tests/tsv_landing_candidates_tests.cpp)
+    target_link_libraries(tsv_landing_candidates_tests PRIVATE eda_core)
+    add_test(NAME tsv_landing_candidates COMMAND tsv_landing_candidates_tests "${CMAKE_CURRENT_BINARY_DIR}/tsv-landing-candidates-artifacts")
+    add_executable(tsv_landing_rrr_tests tests/tsv_landing_rrr_tests.cpp)
+    target_link_libraries(tsv_landing_rrr_tests PRIVATE eda_core)
+    add_test(NAME tsv_landing_rrr COMMAND tsv_landing_rrr_tests "${CMAKE_CURRENT_BINARY_DIR}/tsv-landing-rrr-artifacts" "${CMAKE_CURRENT_SOURCE_DIR}/output/runtime/official-flute")
 endif()

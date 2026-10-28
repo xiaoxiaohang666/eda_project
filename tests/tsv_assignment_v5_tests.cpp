@@ -27,6 +27,8 @@ std::string technology() {
            <<" ; WIDTH 0.2 ; END "<<name<<'\n';
     }
     out<<"MACRO RESOURCE_SLOT_top SIZE 7 BY 7 ; END RESOURCE_SLOT_top\n"
+       <<"MACRO TSV_BOTTOM SIZE 7 BY 7 ; PIN TSV_PORT PORT LAYER metal10 ; RECT 1 1 6 6 ; END END TSV_PORT END TSV_BOTTOM\n"
+       <<"MACRO TSV_TOP SIZE 7 BY 7 ; PIN TSV_PORT PORT LAYER metal11 ; RECT 1 1 6 6 ; END END TSV_PORT END TSV_TOP\n"
        <<"LAYER tsv TYPE CUT ; END tsv\n"
        <<"VIA tsv_v DEFAULT LAYER metal10 ; RECT -2.5 -2.5 2.5 2.5 ; LAYER tsv ; "
        <<"RECT -2.5 -2.5 2.5 2.5 ; LAYER metal11 ; RECT -2.5 -2.5 2.5 2.5 ; END tsv_v\n";
@@ -123,6 +125,12 @@ void cycle_and_budget_tests(const fs::path& dir,const LefParser& lef) {
     options.block_max_seconds=1e-12;TsvPolicy expired(def,lef,graph,options);
     require(expired.assign(def.nets(),thermal)==before && expired.assignment_block_budget_exhausted() &&
             expired.assignment_block_cost_evaluations()==0,"monotonic cap preserves a complete known-feasible assignment");
+    auto no_polish=base_options();no_polish.assignment_polish=false;
+    TsvPolicy feasible(def,lef,graph,no_polish);const auto feasible_assignment=feasible.assign(def.nets(),thermal);
+    options=base_options();options.assignment_block_refine=true;TsvPolicy global_expired(def,lef,graph,options);
+    require(global_expired.assign(def.nets(),thermal,std::chrono::steady_clock::now()-std::chrono::seconds(1))==feasible_assignment &&
+            global_expired.assignment_polish_passes()==0 && global_expired.assignment_block_cost_evaluations()==0,
+            "expired shared deadline preserves feasibility and skips optional polish and block work");
     auto many_pins=def.nets();while (many_pins[0].pins.size()<=64) many_pins[0].pins.push_back(many_pins[0].pins.front());
     options=base_options();TsvPolicy many_old(def,lef,graph,options);const auto many_before=many_old.assign(many_pins,thermal);
     options.assignment_block_refine=true;TsvPolicy many_new(def,lef,graph,options);const auto many_after=many_new.assign(many_pins,thermal);

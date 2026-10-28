@@ -9,27 +9,55 @@
 
 namespace {
 void usage(const char* p) {
-    std::cout<<"3D IC Global Router v5\nUsage: "<<p<<" --def FILE --lef FILE --thermal-report FILE --output FILE\n"
+    std::cout<<"3D IC Global Router v9 (documented-rules-v1)\nUsage: "<<p<<" --def FILE --lef FILE --thermal-report FILE --output FILE\n"
         <<"Input aliases: --input-def, --lefs (repeatable), --thermal-json, -o\n"
         <<"--router negotiated|baseline  (default negotiated)\n"
         <<"--rrr-rounds N  --tsv-rounds N  (defaults 30, 10)\n"
         <<"--rrr-score-aware 0|1 (default 0; official movable-demand congestion priority)\n"
         <<"--rrr-net-limit N (default 128; 1..8192, requires rrr-score-aware 1)\n"
+        <<"--v9-incremental-rrr 0|1 --v9-checkpoint-groups N (1..256) --v9-checkpoint-seconds S (>0..60)\n"
+        <<"--v9-subtree-recovery 0|1 --v9-subtree-branches N (1..16) --v9-subtree-boundary N (2..64)\n"
+        <<"--v9-access-rematch 0|1 --v9-rematch-edges N (2..32) --v9-rematch-access-seconds S (>0..1)\n"
+        <<"--v9-tsv-coverage 0|1 --v9-tsv-stale-sweeps N (1..8) --v9-thermal-regions 0|1\n"
+        <<"--v9-adaptive-budget 0|1 (stage allocation by measured gain/time, unified process clock)\n"
+        <<"--v8-rrr 0|1 --v8-rrr-group-size N (1..256, default 48; hotspot transactions)\n"
+        <<"--v8-tsv-rematch 0|1 --v8-tsv-rematch-group-size N (2..8, default 6)\n"
+        <<"--v8-tsv-rematch-nets N (1..32768, default 256) --v8-tsv-rematch-seconds N (>0..3600)\n"
+        <<"--v8-tsv-dynamic 0|1 --v8-tsv-probe-candidates N (1..8, default 2)\n"
+        <<"--v8-recovery 0|1 (migration excess priority and layer/trunk candidates; requires large-recovery)\n"
+        <<"--unified-budget 0|1 (all optional stages share routing cutoff; default 0)\n"
+        <<"--congestion-price-cap N (>0..1e9, default 10000) --score-unit-cost 0|1 (finite Q loss)\n"
+        <<"--v7-rrr 0|1 (default 0; adaptive RRR and bounded congestion search)\n"
+        <<"--v7-rrr-net-limit N (1..32768, default 4096)\n"
+        <<"--v7-rrr-astar-net-limit N (0..4096, default 64; zero disables maze trials)\n"
+        <<"--v7-rrr-astar-expansions N (1..1000000, default 20000, per rerouted net)\n"
+        <<"--v7-rrr-astar-seconds N (>0..10, default 0.1, per rerouted net)\n"
+        <<"--v7-tsv 0|1 (default 0; post-route TSV/thermal joint refinement)\n"
+        <<"--v7-tsv-nets N (1..32768, default 256) --v7-tsv-candidates N (1..64, default 4)\n"
+        <<"--v7-tsv-seconds N (>0..3600, default 30; within total routing budget)\n"
+        <<"--v7-topology 0|1 (default 0; compare shared pin-rooted trees during initial/refinement routing)\n"
+        <<"--v7-cell-cost 0|1 (default 0; incremental own-tree cell reuse)\n"
+        <<"--resource-profile documented|20261020 (production uses documented resources)\n"
+        <<"--tsv-track-demand 0|1 (5um landing-cell track union; default 0)\n"
+        <<"--tsv-landing-pricing 0|1 (撤账后TSV候选报价; requires track demand and dynamic TSV)\n"
+        <<"--tsv-landing-rrr 0|1 (fixed-TSV M11 movable-Guide repair; requires track demand and hotspot RRR)\n"
         <<"--large-recovery 0|1 (default 0; bounded fixed-TSV Guide wirelength recovery, official only)\n"
         <<"--large-recovery-nets N (1..4096, default 1024) --large-recovery-rounds N (1..2, default 1)\n"
-        <<"--large-recovery-seconds N (0..3600 exclusive of zero, default 300; additional phase budget)\n"
+        <<"--large-recovery-seconds N (0..3600 exclusive of zero, default 300; capped by total with unified-budget 1)\n"
         <<"--large-recovery-branches N (0..8, default 8; zero disables shared branch candidates)\n"
         <<"--search astar|dijkstra  --search-limit N (per search, default 250000)\n"
         <<"--time-limit SECONDS (default 120; scales with large net count)  --local-repair 0|1 (default 1)\n"
         <<"--wirelength-rounds N (default 3)  --pin-local 0|1 (default 1)\n"
         <<"--tsv-local 0|1 (default 1)  Fixed-TSV terminal path recovery\n"
-        <<"--tsv-resource-mode auto|paired|projected (default auto) --tsv-candidates N --tsv-max-candidates N\n"
+        <<"--tsv-resource-mode auto|paired|projected|global-grid (default auto) --tsv-candidates N --tsv-max-candidates N\n"
         <<"--cell-pin-access 0|1 --fast-initial 0|1 (defaults 1)\n"
         <<"--fast-quality 0|1 (default 1; bounded official fast tree/Z improvements)\n"
         <<"--fast-layer-pruning 0|1 (default 1; equivalent pruning of dominated L candidates)\n"
-        <<"--model physical|official (default physical; official matches new score)\n"
+        <<"--model physical|official (default physical; official uses documented October 20 rules)\n"
+        <<"--score-profile 20261020 (selected automatically for official; legacy is diagnostic only)\n"
         <<"--official-score-pricing 0|1 (default 0; derivative-scaled W/C congestion prices)\n"
         <<"--official-runtime DIR --nonpreferred 0|1 (official Guide model)\n"
+        <<"--thermal-gain G (>0; default 20 is a uniform proxy, never inferred from filename)\n"
         <<"--tsv-assignment-polish 0|1 (default 0; projected resource move/swap proxy optimization)\n"
         <<"--tsv-polish-thermal weighted|pareto (default weighted; pareto requires official model)\n"
         <<"--tsv-polish-heat-weight NUMBER (default 2; experimental proxy, requires polish 1)\n"
@@ -59,14 +87,20 @@ int main(int argc,char** argv) {
         if(argc<2) {usage(argv[0]);return 1;}
         std::string def_file,thermal_file,output="output/result.guide",stats,kind="negotiated";
         std::vector<std::string> lefs;eda::RouterOptions options;bool explicit_time=false,explicit_polish_heat=false,explicit_polish_thermal=false,explicit_polish_budget=false,explicit_rrr_limit=false,explicit_recovery_budget=false;
-        bool explicit_block_budget=false,explicit_topology_budget=false;
+        bool explicit_block_budget=false,explicit_topology_budget=false,explicit_nonpreferred=false,explicit_v7_budget=false,explicit_v7_tsv_budget=false;
+        options.process_started=std::chrono::steady_clock::now();
+        std::set<std::string> explicit_v8,explicit_v9;
         for(int i=1;i<argc;++i) {
             std::string arg=argv[i];if(arg=="--help"||arg=="-h") {usage(argv[0]);return 0;}
             const std::set<std::string> recognized={"--def","--input-def","--lef","--lefs","--thermal-report","--thermal-json",
-                "--output","-o","--stats","--router","--rrr-rounds","--rrr-score-aware","--rrr-net-limit","--tsv-rounds","--search","--time-limit","--search-limit","--local-repair","--wirelength-rounds","--pin-local","--tsv-local","--tsv-resource-mode","--tsv-candidates","--tsv-max-candidates","--cell-pin-access","--fast-initial","--fast-quality","--fast-layer-pruning","--model","--official-runtime","--official-score-pricing","--nonpreferred","--tsv-assignment-polish","--tsv-polish-heat-weight","--tsv-polish-thermal","--tsv-polish-candidates","--tsv-polish-passes","--tsv-polish-bidirectional","--tsv-polish-thermal-candidates"};
+                "--output","-o","--stats","--router","--rrr-rounds","--rrr-score-aware","--rrr-net-limit","--tsv-rounds","--search","--time-limit","--search-limit","--local-repair","--wirelength-rounds","--pin-local","--tsv-local","--tsv-resource-mode","--tsv-candidates","--tsv-max-candidates","--cell-pin-access","--fast-initial","--fast-quality","--fast-layer-pruning","--model","--official-runtime","--thermal-gain","--official-score-pricing","--nonpreferred","--tsv-assignment-polish","--tsv-polish-heat-weight","--tsv-polish-thermal","--tsv-polish-candidates","--tsv-polish-passes","--tsv-polish-bidirectional","--tsv-polish-thermal-candidates"};
             const std::set<std::string> recovery_options={"--large-recovery","--large-recovery-nets","--large-recovery-rounds","--large-recovery-seconds","--large-recovery-branches"};
             const std::set<std::string> v5_options={"--tsv-block-refine","--tsv-block-size","--tsv-block-passes","--tsv-block-max-groups","--tsv-block-max-evals","--tsv-block-seconds","--v5-pin-rooted","--v5-topology-max-pins"};
-            if(!recognized.count(arg)&&!recovery_options.count(arg)&&!v5_options.count(arg)) throw std::runtime_error("unknown option: "+arg);
+            const std::set<std::string> v7_options={"--v7-topology","--v7-rrr","--v7-rrr-net-limit","--v7-rrr-astar-net-limit","--v7-rrr-astar-expansions","--v7-rrr-astar-seconds","--v7-cell-cost","--resource-profile","--v7-tsv","--v7-tsv-nets","--v7-tsv-candidates","--v7-tsv-seconds"};
+            const std::set<std::string> v8_options={"--v8-rrr","--v8-rrr-group-size","--v8-tsv-rematch","--v8-tsv-rematch-group-size","--v8-tsv-rematch-nets","--v8-tsv-rematch-seconds","--v8-tsv-dynamic","--v8-tsv-probe-candidates","--v8-recovery","--unified-budget","--congestion-price-cap","--score-unit-cost"};
+            const std::set<std::string> v9_options={"--v9-incremental-rrr","--v9-checkpoint-groups","--v9-checkpoint-seconds","--v9-subtree-recovery","--v9-subtree-branches","--v9-subtree-boundary","--v9-access-rematch","--v9-rematch-edges","--v9-rematch-access-seconds","--v9-tsv-coverage","--v9-tsv-stale-sweeps","--v9-thermal-regions","--v9-adaptive-budget"};
+            const std::set<std::string> landing_options={"--tsv-track-demand","--tsv-landing-pricing","--tsv-landing-rrr"};
+            if(!landing_options.count(arg)&&!v9_options.count(arg)&&!v8_options.count(arg)&&!recognized.count(arg)&&!recovery_options.count(arg)&&!v5_options.count(arg)&&!v7_options.count(arg)&&arg!="--score-profile") throw std::runtime_error("unknown option: "+arg);
             if(i+1>=argc) throw std::runtime_error("missing option value: "+arg);
             const std::string value=argv[++i];if(value.empty()||value[0]=='-') throw std::runtime_error("invalid option value: "+arg);
             if(arg=="--def"||arg=="--input-def") def_file=value;
@@ -74,8 +108,116 @@ int main(int argc,char** argv) {
             else if(arg=="--thermal-report"||arg=="--thermal-json") thermal_file=value;
             else if(arg=="--output"||arg=="-o") output=value;
             else if(arg=="--stats") stats=value;
+            else if(arg=="--thermal-gain") {
+                size_t end=0;const double gain=std::stod(value,&end);
+                if(end!=value.size()||!std::isfinite(gain)||gain<=0||gain>1e6) throw std::runtime_error("thermal gain out of range");
+                options.official_metrics.thermal_gain=gain;options.explicit_thermal_gain=true;
+            }
             else if(arg=="--router") {if(value!="baseline"&&value!="negotiated") throw std::runtime_error("invalid router");kind=value;}
             else if(arg=="--rrr-rounds") options.rrr_rounds=integer(value);
+            else if(landing_options.count(arg)) {
+                const int v=integer(value);if(v>1) throw std::runtime_error("TSV landing boolean must be 0 or 1");
+                if(arg=="--tsv-track-demand") options.official_metrics.tsv_track_demand=v;
+                else if(arg=="--tsv-landing-pricing") options.tsv_landing_pricing=v;
+                else options.tsv_landing_rrr=v;
+            }
+            else if(v9_options.count(arg)) {
+                explicit_v9.insert(arg);
+                if(arg=="--v9-rematch-access-seconds") {
+                    size_t end=0;const double v=std::stod(value,&end);
+                    if(end!=value.size()||!std::isfinite(v)||v<=0||v>1) throw std::runtime_error("v9 access seconds out of range");
+                    options.v9_rematch_access_seconds=v;
+                } else if(arg=="--v9-checkpoint-seconds") {
+                    size_t end=0;const double v=std::stod(value,&end);
+                    if(end!=value.size()||!std::isfinite(v)||v<=0||v>60) throw std::runtime_error("v9 checkpoint seconds out of range");
+                    options.v9_checkpoint_seconds=v;
+                } else if(arg=="--v9-checkpoint-groups"||arg=="--v9-subtree-branches"||arg=="--v9-subtree-boundary"||arg=="--v9-rematch-edges"||arg=="--v9-tsv-stale-sweeps") {
+                    const size_t v=size_t(integer(value,true));
+                    const size_t lo=(arg=="--v9-subtree-boundary"||arg=="--v9-rematch-edges")?2:1;
+                    const size_t hi=arg=="--v9-checkpoint-groups"?256:arg=="--v9-subtree-branches"?16:arg=="--v9-subtree-boundary"?64:arg=="--v9-rematch-edges"?32:8;
+                    if(v<lo||v>hi) throw std::runtime_error("v9 integer budget out of range");
+                    if(arg=="--v9-checkpoint-groups") options.v9_checkpoint_groups=v;
+                    else if(arg=="--v9-subtree-branches") options.v9_subtree_branches=v;
+                    else if(arg=="--v9-subtree-boundary") options.v9_subtree_boundary=v;
+                    else if(arg=="--v9-rematch-edges") options.v9_rematch_edges=v;
+                    else options.v9_tsv_stale_sweeps=v;
+                } else {
+                    const int v=integer(value);if(v>1) throw std::runtime_error("v9 boolean must be 0 or 1");
+                    if(arg=="--v9-incremental-rrr") options.v9_incremental_rrr=v;
+                    else if(arg=="--v9-subtree-recovery") options.v9_subtree_recovery=v;
+                    else if(arg=="--v9-access-rematch") options.v9_access_rematch=v;
+                    else if(arg=="--v9-tsv-coverage") options.v9_tsv_coverage=v;
+                    else if(arg=="--v9-thermal-regions") options.v9_thermal_regions=v;
+                    else options.v9_adaptive_budget=v;
+                }
+            }
+            else if(v8_options.count(arg)) {
+                explicit_v8.insert(arg);
+                if(arg=="--congestion-price-cap"||arg=="--v8-tsv-rematch-seconds") {
+                    size_t end=0;const double v=std::stod(value,&end);
+                    const double upper=arg=="--congestion-price-cap"?1e9:3600;
+                    if(end!=value.size()||!std::isfinite(v)||v<=0||v>upper) throw std::runtime_error(arg+" out of range");
+                    if(arg=="--congestion-price-cap") options.congestion_price_cap=v;else options.v8_tsv_rematch_seconds=v;
+                } else if(arg=="--v8-rrr-group-size"||arg=="--v8-tsv-rematch-group-size"||arg=="--v8-tsv-rematch-nets"||arg=="--v8-tsv-probe-candidates") {
+                    const size_t v=size_t(integer(value,true));
+                    if(arg=="--v8-rrr-group-size") {if(v>256) throw std::runtime_error("v8 RRR group size must be 1..256");options.v8_rrr_group_size=v;}
+                    else if(arg=="--v8-tsv-rematch-group-size") {if(v<2||v>8) throw std::runtime_error("v8 rematch group size must be 2..8");options.v8_tsv_rematch_group_size=v;}
+                    else if(arg=="--v8-tsv-rematch-nets") {if(v>32768) throw std::runtime_error("v8 rematch nets must be 1..32768");options.v8_tsv_rematch_nets=v;}
+                    else {if(v>8) throw std::runtime_error("v8 probe candidates must be 1..8");options.v8_tsv_probe_candidates=v;}
+                } else {
+                    const int v=integer(value);if(v>1) throw std::runtime_error("v8 boolean option must be 0 or 1");
+                    if(arg=="--v8-rrr") options.v8_rrr=v;
+                    else if(arg=="--v8-tsv-rematch") options.v8_tsv_rematch=v;
+                    else if(arg=="--v8-tsv-dynamic") options.v8_tsv_dynamic=v;
+                    else if(arg=="--v8-recovery") options.v8_recovery=v;
+                    else if(arg=="--unified-budget") options.unified_budget=v;
+                    else options.score_unit_cost=v;
+                }
+            }
+            else if(v7_options.count(arg)) {
+                if(arg=="--resource-profile") {
+                    if(value!="documented"&&value!="20261020"&&value!="platform-20261024") throw std::runtime_error("invalid resource profile");
+                    options.graph_options.platform_20261024=value=="platform-20261024";
+                } else if(arg=="--v7-tsv-seconds") {
+                    size_t end=0;const double v=std::stod(value,&end);
+                    if(end!=value.size()||!std::isfinite(v)||v<=0||v>3600) throw std::runtime_error("v7-tsv-seconds must be >0 and <=3600");
+                    options.v7_tsv_seconds=v;explicit_v7_tsv_budget=true;
+                } else if(arg=="--v7-tsv-nets"||arg=="--v7-tsv-candidates") {
+                    const int v=integer(value,true);explicit_v7_tsv_budget=true;
+                    if(arg=="--v7-tsv-nets") {
+                        if(v>32768) throw std::runtime_error("v7-tsv-nets must be 1..32768");
+                        options.v7_tsv_nets=size_t(v);
+                    } else {
+                        if(v>64) throw std::runtime_error("v7-tsv-candidates must be 1..64");
+                        options.v7_tsv_candidates=size_t(v);
+                    }
+                } else if(arg=="--v7-tsv") {
+                    const int v=integer(value);if(v>1) throw std::runtime_error("v7-tsv must be 0 or 1");
+                    options.v7_tsv=v;
+                } else if(arg=="--v7-rrr-astar-seconds") {
+                    size_t end=0;const double v=std::stod(value,&end);
+                    if(end!=value.size()||!std::isfinite(v)||v<=0||v>10) throw std::runtime_error("v7-rrr-astar-seconds must be >0 and <=10");
+                    options.v7_rrr_astar_seconds=v;explicit_v7_budget=true;
+                } else {
+                    const int v=integer(value);
+                    if(arg=="--v7-rrr"||arg=="--v7-cell-cost"||arg=="--v7-topology") {
+                        if(v>1) throw std::runtime_error("v7 boolean option must be 0 or 1");
+                        if(arg=="--v7-rrr") options.v7_rrr=v;else if(arg=="--v7-topology") options.v7_topology=v;else options.v7_cell_cost=v;
+                    } else {
+                        explicit_v7_budget=true;
+                        if(arg=="--v7-rrr-net-limit") {
+                            if(v<1||v>32768) throw std::runtime_error("v7-rrr-net-limit must be 1..32768");
+                            options.v7_rrr_net_limit=size_t(v);
+                        } else if(arg=="--v7-rrr-astar-net-limit") {
+                            if(v>4096) throw std::runtime_error("v7-rrr-astar-net-limit must be 0..4096");
+                            options.v7_rrr_astar_net_limit=size_t(v);
+                        } else {
+                            if(v<1||v>1000000) throw std::runtime_error("v7-rrr-astar-expansions must be 1..1000000");
+                            options.v7_rrr_astar_expansions=size_t(v);
+                        }
+                    }
+                }
+            }
             else if(v5_options.count(arg)) {
                 if(arg=="--tsv-block-seconds") {
                     size_t end=0;const double v=std::stod(value,&end);
@@ -142,6 +284,7 @@ int main(int argc,char** argv) {
                 if(value=="auto") options.tsv_policy.resource_mode=eda::TsvResourceMode::AUTO;
                 else if(value=="paired") options.tsv_policy.resource_mode=eda::TsvResourceMode::PAIRED;
                 else if(value=="projected") options.tsv_policy.resource_mode=eda::TsvResourceMode::PROJECTED;
+                else if(value=="global-grid") options.tsv_policy.resource_mode=eda::TsvResourceMode::GLOBAL_GRID;
                 else throw std::runtime_error("invalid TSV resource mode");
             }
             else if(arg=="--tsv-polish-thermal") {
@@ -184,17 +327,77 @@ int main(int argc,char** argv) {
                 options.official_model=value=="official";
             }
             else if(arg=="--official-runtime") options.official_runtime=value;
+            else if(arg=="--score-profile") {
+                if(value!="legacy-20261011" && value!="20261020") throw std::runtime_error("invalid score profile");
+                if(value=="legacy-20261011") throw std::runtime_error("legacy score profile is diagnostic only; production routing uses 20261020");
+                options.official_metrics.score_20261020=true;
+                options.graph_options.score_20261020=options.official_metrics.score_20261020;
+            }
             else if(arg=="--official-score-pricing") {
                 const int v=integer(value);if(v>1) throw std::runtime_error("official-score-pricing must be 0 or 1");
                 options.official_score_pricing=v;
             }
-            else if(arg=="--nonpreferred") {int v=integer(value);if(v>1) throw std::runtime_error("nonpreferred must be 0 or 1");options.graph_options.allow_nonpreferred=v;}
+            else if(arg=="--nonpreferred") {int v=integer(value);if(v>1) throw std::runtime_error("nonpreferred must be 0 or 1");options.graph_options.allow_nonpreferred=v;explicit_nonpreferred=true;}
             else if(arg=="--search-limit") options.search_limit=size_t(integer(value,true));
             else if(arg=="--local-repair") {int v=integer(value);if(v>1) throw std::runtime_error("local-repair must be 0 or 1");options.local_repair=v;}
             else if(arg=="--search") {if(value!="astar"&&value!="dijkstra") throw std::runtime_error("invalid search");options.dijkstra=value=="dijkstra";}
             else if(arg=="--time-limit") {explicit_time=true;size_t end=0;options.time_limit=std::stod(value,&end);
                 if(end!=value.size()||!std::isfinite(options.time_limit)||options.time_limit<=0) throw std::runtime_error("invalid time limit");}
         }
+        if(options.official_model) {
+            options.official_metrics.score_20261020=true;
+            options.graph_options.score_20261020=true;
+        }
+        if(options.official_metrics.score_20261020) {
+            if(!options.official_model) throw std::runtime_error("20261020 score profile requires --model official");
+            if(explicit_nonpreferred && options.graph_options.allow_nonpreferred)
+                throw std::runtime_error("20261020 score profile forbids --nonpreferred 1");
+            options.graph_options.allow_nonpreferred=false;
+        }
+        if(options.official_metrics.tsv_track_demand && (!options.official_model || options.tsv_policy.resource_mode!=eda::TsvResourceMode::GLOBAL_GRID))
+            throw std::runtime_error("TSV track demand requires --model official --tsv-resource-mode global-grid");
+        if(options.tsv_landing_pricing && (!options.official_metrics.tsv_track_demand || !options.v8_tsv_dynamic))
+            throw std::runtime_error("TSV landing pricing requires --tsv-track-demand 1 --v8-tsv-dynamic 1");
+        if(options.tsv_landing_rrr && (!options.official_metrics.tsv_track_demand || !options.v8_rrr))
+            throw std::runtime_error("TSV landing RRR requires --tsv-track-demand 1 --v8-rrr 1");
+        const bool any_v9=options.v9_incremental_rrr||options.v9_subtree_recovery||options.v9_access_rematch||options.v9_tsv_coverage||options.v9_thermal_regions||options.v9_adaptive_budget;
+        if(any_v9&&(!options.official_model||!options.unified_budget)) throw std::runtime_error("v9 requires --model official and --unified-budget 1");
+        if(options.v9_incremental_rrr&&!options.v8_rrr) throw std::runtime_error("v9 incremental RRR requires --v8-rrr 1");
+        if(options.v9_subtree_recovery&&!options.large_recovery) throw std::runtime_error("v9 subtree recovery requires --large-recovery 1");
+        if(options.v9_access_rematch&&!options.v8_tsv_rematch) throw std::runtime_error("v9 access rematch requires --v8-tsv-rematch 1");
+        if((options.v9_tsv_coverage||options.v9_thermal_regions)&&!options.v8_tsv_dynamic) throw std::runtime_error("v9 TSV requires --v8-tsv-dynamic 1");
+        for(const auto& flag:explicit_v9) {
+            if(flag.find("--v9-checkpoint-")==0&&!options.v9_incremental_rrr) throw std::runtime_error("v9 checkpoint budget requires incremental RRR");
+            if((flag=="--v9-subtree-branches"||flag=="--v9-subtree-boundary")&&!options.v9_subtree_recovery) throw std::runtime_error("v9 subtree budgets require subtree recovery");
+            if((flag=="--v9-rematch-edges"||flag=="--v9-rematch-access-seconds")&&!options.v9_access_rematch) throw std::runtime_error("v9 rematch budget requires access rematch");
+            if(flag=="--v9-tsv-stale-sweeps"&&!options.v9_tsv_coverage) throw std::runtime_error("v9 sweep budget requires TSV coverage");
+        }
+        if((options.v8_rrr||options.v8_tsv_dynamic||options.v8_tsv_rematch||options.v8_recovery||options.score_unit_cost) &&
+           (!options.official_model||!options.official_metrics.score_20261020))
+            throw std::runtime_error("v8 routing requires --model official --score-profile 20261020");
+        if(options.v8_rrr&&!options.rrr_score_aware) throw std::runtime_error("v8 RRR requires --rrr-score-aware 1");
+        if((options.v8_tsv_rematch||options.v8_tsv_dynamic)&&options.tsv_policy.resource_mode!=eda::TsvResourceMode::GLOBAL_GRID)
+            throw std::runtime_error("v8 TSV requires --tsv-resource-mode global-grid");
+        if(options.v8_tsv_dynamic&&!options.v7_tsv) throw std::runtime_error("dynamic TSV requires --v7-tsv 1");
+        if(options.v8_recovery&&!options.large_recovery) throw std::runtime_error("v8 recovery requires --large-recovery 1");
+        if((options.score_unit_cost||explicit_v8.count("--congestion-price-cap"))&&!options.official_score_pricing)
+            throw std::runtime_error("search price options require --official-score-pricing 1");
+        for(const auto& flag:explicit_v8) {
+            if(flag.find("--v8-tsv-rematch-")==0&&!options.v8_tsv_rematch) throw std::runtime_error("rematch budgets require --v8-tsv-rematch 1");
+            if(flag=="--v8-rrr-group-size"&&!options.v8_rrr) throw std::runtime_error("group budget requires --v8-rrr 1");
+            if(flag=="--v8-tsv-probe-candidates"&&!options.v8_tsv_dynamic) throw std::runtime_error("probe budget requires --v8-tsv-dynamic 1");
+        }
+        if((options.v7_topology||options.v7_rrr||options.v7_cell_cost||options.v7_tsv||options.graph_options.platform_20261024) &&
+           (!options.official_model||!options.official_metrics.score_20261020))
+            throw std::runtime_error("v7 routing and platform resources require --model official --score-profile 20261020");
+        if(explicit_v7_tsv_budget&&!options.v7_tsv)
+            throw std::runtime_error("v7 TSV budgets require --v7-tsv 1");
+        if(options.v7_tsv&&options.tsv_policy.resource_mode!=eda::TsvResourceMode::GLOBAL_GRID)
+            throw std::runtime_error("v7 TSV optimization requires --tsv-resource-mode global-grid");
+        if(explicit_v7_budget&&!options.v7_rrr&&!options.v8_rrr)
+            throw std::runtime_error("v7 RRR budgets require --v7-rrr 1");
+        if(options.v7_rrr&&!options.rrr_score_aware)
+            throw std::runtime_error("v7 RRR requires --rrr-score-aware 1");
         if(explicit_polish_heat&&!options.tsv_policy.assignment_polish)
             throw std::runtime_error("--tsv-polish-heat-weight requires --tsv-assignment-polish 1");
         if(explicit_polish_thermal&&!options.tsv_policy.assignment_polish)
@@ -217,12 +420,16 @@ int main(int argc,char** argv) {
             throw std::runtime_error("large recovery requires --model official");
         if(explicit_recovery_budget && !options.large_recovery)
             throw std::runtime_error("large recovery budgets require --large-recovery 1");
+        if(options.tsv_policy.resource_mode==eda::TsvResourceMode::GLOBAL_GRID&&!options.official_model)
+            throw std::runtime_error("global-grid TSV resources require --model official");
         if((options.tsv_policy.assignment_block_refine||options.v5_pin_rooted)&&!options.official_model)
             throw std::runtime_error("v5 assignment/topology optimization requires --model official");
         if(explicit_block_budget&&!options.tsv_policy.assignment_block_refine)
             throw std::runtime_error("TSV block budgets require --tsv-block-refine 1");
         if(explicit_topology_budget&&!options.v5_pin_rooted)
             throw std::runtime_error("v5 topology budget requires --v5-pin-rooted 1");
+        if(options.graph_options.platform_20261024)
+            throw std::runtime_error("platform-20261024 resources are diagnostic only; use --resource-profile documented");
         if(def_file.empty()||lefs.empty()||thermal_file.empty()) throw std::runtime_error("required: --def --lef --thermal-report");
         std::vector<std::string> inputs=lefs;inputs.push_back(def_file);inputs.push_back(thermal_file);
         for(const auto& input:inputs) if(same_file(input,output)||(!stats.empty()&&same_file(input,stats)))
@@ -238,7 +445,8 @@ int main(int argc,char** argv) {
         if(options.official_model) {
             if(kind!="negotiated") throw std::runtime_error("official model requires negotiated router");
             options.graph_options.geometry=eda::RoutingGeometryMode::GLOBAL_GUIDE;
-            options.official_metrics.thermal_gain=eda::official_thermal_gain_for_def_file(def_file);
+            if(!options.explicit_thermal_gain)
+                std::cerr<<"[MODEL] Thermal gain 20 is a uniform proxy; official G_case is not specified by the text.\n";
             options.official_metrics.gcell_width_dbu=def.gcell_pitch_x();
             options.official_metrics.gcell_height_dbu=def.gcell_pitch_y();
             if(options.official_runtime.empty()) options.official_runtime="output/runtime/official-flute";

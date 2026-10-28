@@ -26,7 +26,8 @@ public:
     // containing [x_um, y_um, z_um, temperature].
     bool parse_json(const std::string& json_file_path, const GCellGrid& grid,
                     double dbu_per_micron, const Rect& die_area,
-                    ThermalMapping mapping = ThermalMapping::LEGACY_BILINEAR);
+                    ThermalMapping mapping = ThermalMapping::LEGACY_BILINEAR,
+                    bool capture_node_counts = false);
 
     double ambient_temperature() const { return ambient_; }
     double get_temperature(int col, int row) const {
@@ -44,6 +45,8 @@ public:
     // preceding-cell fill, as does the official report's mapped_thermal_xy_nodes.
     size_t mapped_nodes() const { return mapped_nodes_; }
     size_t projected_nodes() const { return projected_nodes_; }
+    // Optional scorer artifact; routing callers do not retain this matrix.
+    const std::vector<std::vector<size_t>>& node_counts() const { return node_counts_; }
     ThermalMapping mapping_strategy() const { return mapping_; }
     const char* mapping_mode() const {
         if (mapping_ == ThermalMapping::OFFICIAL_PREVIOUS && filled_cells_)
@@ -54,6 +57,7 @@ public:
 private:
     double ambient_{25.0};
     std::vector<std::vector<double>> heat_matrix_;
+    std::vector<std::vector<size_t>> node_counts_;
     std::vector<HotspotCell> hotspots_;
     size_t interpolated_cells_{0};
     size_t filled_cells_{0};

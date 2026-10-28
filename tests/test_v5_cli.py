@@ -48,6 +48,9 @@ class V5CliTests(unittest.TestCase):
             with self.subTest(options=options):
                 self.reject(["--model", "official", *options], expected)
 
+    def test_global_grid_requires_official(self):
+        self.reject(["--tsv-resource-mode", "global-grid"], "require --model official")
+
 
 if __name__ == "__main__":
     unittest.main()

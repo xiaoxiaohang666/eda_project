@@ -142,7 +142,7 @@ class OfficialCliTests(unittest.TestCase):
         for path, data in self.input_bytes.items():
             self.assertEqual(path.read_bytes(), data, f"input changed: {path}")
         report = json.loads(stats.read_text())
-        self.assertEqual(report["scoring_model"], "official-2026")
+        self.assertEqual(report["scoring_model"], "documented-20261020")
         self.assertEqual(report["guide_encoding"], "global-gcell-regions")
         return guide, report
 

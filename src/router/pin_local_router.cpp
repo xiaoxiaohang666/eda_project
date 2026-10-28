@@ -24,11 +24,17 @@ std::vector<NetRoute> NegotiatedRouter::terminal_pair_candidates(
         const Pin& first,const Pin& last,int low,int high) {
     std::vector<NetRoute> result;
     const auto& grid=graph_.grid();
-    // These candidates follow the actual terminal coordinates. Unlike a
-    // center-grid path, a short net need not make two detours to cell centers.
-    // Every segment/via is checked, and every crossed resource is reserved.
+    // The submission's global-grid model emits occupied GCells, not physical
+    // wire-width corridors. Keep physical geometry only for the older models.
+    const bool grid_geometry=options_.official_model &&
+        options_.tsv_policy.resource_mode==TsvResourceMode::GLOBAL_GRID;
+    auto terminal_point=[&](const Pin& pin) {
+        if(!grid_geometry) return pin.coord;
+        return graph_.point(graph_.node(grid.get_col(pin.coord.x),grid.get_row(pin.coord.y),pin.layer_idx));
+    };
+    const Point first_point=terminal_point(first),last_point=terminal_point(last);
     auto build=[&](int horizontal,int vertical,int kind)->std::optional<NetRoute> {
-        NetRoute route;route.explicit_geometry=true;
+        NetRoute route;route.explicit_geometry=!grid_geometry;
         PinAccess geometry;
         auto append_guide=[&](const Rect& r,int layer) {
             const auto& die=def_.die_area();
@@ -53,21 +59,24 @@ std::vector<NetRoute> NegotiatedRouter::terminal_pair_candidates(
                 if(!reserve(n,next)) return false;
                 n=next;
             }
-            append_guide(graph_.segment_rect(a,b,layer),layer);
-            geometry.length+=a.distance_to(b);return true;
+            if(!grid_geometry) {
+                append_guide(graph_.segment_rect(a,b,layer),layer);
+                geometry.length+=a.distance_to(b);
+            }
+            return true;
         };
         auto stack=[&](Point p,int from,int to) {
             for(int l=std::min(from,to);l<std::max(from,to);++l) {
                 if(l==10||!graph_.legal_via(p,l)||!reserve(node_at(p,l),node_at(p,l+1))) return false;
-                for(const auto& shape:graph_.via_rects(p,l)) {
+                if(!grid_geometry) for(const auto& shape:graph_.via_rects(p,l)) {
                     int metal=get_layer_index(shape.layer);
                     if(metal) append_guide(shape.rect,metal);
                 }
-                ++geometry.vias;
+                if(!grid_geometry) ++geometry.vias;
             }
             return true;
         };
-        Point cursor=first.coord;int layer=first.layer_idx;
+        Point cursor=first_point;int layer=first.layer_idx;
         if(!segment(cursor,cursor,layer)) return std::nullopt;
         auto leg=[&](Point to,int next_layer) {
             // A degenerate L/Z leg carries no wire. Switching layers here and
@@ -76,21 +85,27 @@ std::vector<NetRoute> NegotiatedRouter::terminal_pair_candidates(
             if(!stack(cursor,layer,next_layer)||!segment(cursor,to,next_layer)) return false;
             cursor=to;layer=next_layer;return true;
         };
-        const Point a=first.coord,b=last.coord;
+        const Point a=first_point,b=last_point;
         bool ok=false;
         if(kind==0) ok=leg({b.x,a.y},horizontal)&&leg(b,vertical);
         if(kind==1) ok=leg({a.x,b.y},vertical)&&leg(b,horizontal);
         if(kind==2) {
-            const double mid=std::floor((a.x+b.x)*0.5);
+            const double mid=grid_geometry
+                ? graph_.point(graph_.node((grid.get_col(a.x)+grid.get_col(b.x))/2,grid.get_row(a.y),horizontal)).x
+                : std::floor((a.x+b.x)*0.5);
             ok=leg({mid,a.y},horizontal)&&leg({mid,b.y},vertical)&&leg(b,horizontal);
         }
         if(kind==3) {
-            const double mid=std::floor((a.y+b.y)*0.5);
+            const double mid=grid_geometry
+                ? graph_.point(graph_.node(grid.get_col(a.x),(grid.get_row(a.y)+grid.get_row(b.y))/2,vertical)).y
+                : std::floor((a.y+b.y)*0.5);
             ok=leg({a.x,mid},vertical)&&leg({b.x,mid},horizontal)&&leg(b,vertical);
         }
         if(!ok||!stack(b,layer,last.layer_idx)||!segment(b,b,last.layer_idx)) return std::nullopt;
-        geometry.node=node_at(first.coord,first.layer_idx);
-        route.accesses.push_back(std::move(geometry));
+        if(!grid_geometry) {
+            geometry.node=node_at(first.coord,first.layer_idx);
+            route.accesses.push_back(std::move(geometry));
+        }
         return route;
     };
     std::vector<std::tuple<int,int,int>> pairs;

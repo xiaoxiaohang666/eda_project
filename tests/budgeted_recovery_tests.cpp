@@ -29,13 +29,14 @@ std::string technology() {
         "LAYER tsv TYPE CUT ; END tsv VIA tsv_v DEFAULT LAYER metal10 ; RECT -0.25 -0.25 0.25 0.25 ; "
         "LAYER tsv ; RECT -0.25 -0.25 0.25 0.25 ; LAYER metal11 ; RECT -0.25 -0.25 0.25 0.25 ; END tsv_v\n";
 }
-std::string prefix(bool rectangular=false) {
-    std::string text="UNITS DISTANCE MICRONS 10 ; DIEAREA ( 0 0 ) ( 200 200 ) ; GCELLGRID X 0 DO 21 STEP 10 ; ";
-    text+=rectangular?"GCELLGRID Y 0 DO 11 STEP 20 ; ":"GCELLGRID Y 0 DO 21 STEP 10 ; ";
+std::string prefix(bool rectangular=false,int height=200) {
+    std::string text="UNITS DISTANCE MICRONS 10 ; DIEAREA ( 0 0 ) ( 200 "+std::to_string(height)+" ) ; GCELLGRID X 0 DO 21 STEP 10 ; ";
+    const int row_pitch=rectangular?20:10;
+    text+="GCELLGRID Y 0 DO "+std::to_string(height/row_pitch+1)+" STEP "+std::to_string(row_pitch)+" ; ";
     for(int layer=1;layer<=20;++layer) {
         const auto name=get_layer_name(layer);
         if(layer==2 && !rectangular) text+="TRACKS X 195 DO 1 STEP 1 LAYER "+name+" ; TRACKS Y 195 DO 1 STEP 1 LAYER "+name+" ; ";
-        else text+="TRACKS X 0.5 DO 200 STEP 1 LAYER "+name+" ; TRACKS Y 0.5 DO 200 STEP 1 LAYER "+name+" ; ";
+        else text+="TRACKS X 0.5 DO 200 STEP 1 LAYER "+name+" ; TRACKS Y 0.5 DO "+std::to_string(height)+" STEP 1 LAYER "+name+" ; ";
     }
     return text+"COMPONENTS 4 ; - b0 RESOURCE_SLOT_bottom + PLACED ( 40 40 ) N ; "
         "- t0 RESOURCE_SLOT_top + PLACED ( 40 40 ) N ; - b1 RESOURCE_SLOT_bottom + PLACED ( 140 140 ) N ; "
@@ -60,6 +61,18 @@ std::string fanout_design() {
     for(int side=0;side<2;++side)for(size_t i=0;i<points.size();++i)out<<"( PIN s"<<side<<'_'<<i<<" ) ";
     out<<"; - many ";for(int i=0;i<17;++i)out<<"( PIN p"<<i<<" ) ";
     out<<"; END NETS END DESIGN";return out.str();
+}
+std::string subtree_design() {
+    // Preserve the real native FLUTE reference for nineteen terminals, while
+    // leaving enough space for a deliberately expensive, legal internal detour.
+    std::ostringstream out;out<<prefix(true,2000)<<"PINS 19 ; ";
+    for(int i=0;i<18;++i) {
+        const int column=i<9?i:i+2;
+        out<<"- branch"<<i<<" + LAYER metal3 ( -1 -1 ) ( 1 1 ) + FIXED ( "<<5+10*column<<" 70 ) N ; ";
+    }
+    out<<"- upper + LAYER metal14 ( -1 -1 ) ( 1 1 ) + FIXED ( 5 70 ) N ; END PINS NETS 1 ; - tree ";
+    for(int i=0;i<18;++i) out<<"( PIN branch"<<i<<" ) ";
+    out<<"( PIN upper ) ; END NETS END DESIGN";return out.str();
 }
 std::string heat() {
     std::ostringstream out;out<<"{\"meta\":{\"ambientTemp\":25},\"nodes\":[";
@@ -219,6 +232,19 @@ struct PinLocalTestAccess {
         require(router.deadline_==deadline && router.present_==2.5 && router.history_scale_==7 && !router.recovery_cell_cost_,
             "phase exit restores the prior deadline, negotiated prices and search cost mode");
         parity(router,"budgeted early exit");
+        router.options_.unified_budget=true;router.options_.large_recovery_seconds=10;
+        router.recover_budgeted_wirelength();
+        require(router.recovery_stats_.timed_out && router.recovery_stats_.attempted==0,
+            "expired shared deadline cannot be extended by a positive recovery stage budget");
+        require(ledger(router)==before && router.deadline_==deadline,"shared recovery timeout preserves incumbent and outer cutoff");
+        router.options_.unified_budget=false;
+        router.options_.v8_recovery=true;router.options_.large_recovery_nets=2;
+        router.pre_tsv_lengths_.resize(router.routes_.size());
+        for(size_t i=0;i<router.routes_.size();++i) router.pre_tsv_lengths_[i]=router.routes_[i].measured.wirelength;
+        router.pre_tsv_lengths_[zero]=0;
+        const auto migration=router.recovery_selection();
+        require(!migration.empty()&&migration.front()==zero,"TSV migration increment outranks preexisting excess length");
+        router.options_.v8_recovery=false;
     }
     static void cell_cost(NegotiatedRouter& router) {
         router.recovery_cell_cost_=true;router.present_=0;router.history_scale_=0;
@@ -232,6 +258,87 @@ struct PinLocalTestAccess {
         near(a.cost,d.cost,"cell-priced non-square A* agrees with Dijkstra");near(d.cost,20,"independent cell-count and via arithmetic matches the oracle");
         require(a.nodes.front()==source && a.nodes.back()==target,"cell pricing preserves real search endpoints");
     }
+    static void subtree(NegotiatedRouter& router) {
+        const size_t i=index(router,"tree");
+        require(router.def_.nets()[i].pins.size()==19,"subtree regression exceeds the old whole-net fanout cutoff");
+        NetRoute old;old.net_index=i;
+        for(size_t slot=0;slot<router.policy_.slots().size();++slot)
+            if(router.policy_.slots()[slot].point.distance_to({5,70})==0 &&
+               router.policy_.compatible(router.def_.nets()[i],int(slot))) {old.slot=int(slot);break;}
+        require(old.slot>=0,"subtree fixture has a compatible real global-grid TSV");
+        auto node=[&](int c,int r,int l) {return router.graph_.node(c,r,l);};
+        auto edge=[&](int a,int b) {
+            require(router.graph_.legal_edge(a,b),"constructed subtree fixture edge obeys preferred direction");
+            old.nodes.insert(a);old.nodes.insert(b);old.edges.insert(route_edge(a,b));
+        };
+        auto horizontal=[&](int a,int b,int row,int layer) {
+            for(int c=a;c<b;++c) edge(node(c,row,layer),node(c+1,row,layer));
+        };
+        auto vertical=[&](int column,int a,int b,int layer) {
+            for(int row=a;row<b;++row) edge(node(column,row,layer),node(column,row+1,layer));
+        };
+        horizontal(0,8,3,3);horizontal(11,19,3,3);
+        const int detour_row=98;
+        edge(node(8,3,3),node(8,3,4));vertical(8,3,detour_row,4);
+        for(int l=4;l<9;++l) edge(node(8,detour_row,l),node(8,detour_row,l+1));
+        horizontal(8,11,detour_row,9);
+        for(int l=4;l<9;++l) edge(node(11,detour_row,l),node(11,detour_row,l+1));
+        vertical(11,3,detour_row,4);edge(node(11,3,4),node(11,3,3));
+        for(int l=3;l<9;++l) edge(node(0,3,l),node(0,3,l+1));
+        for(int l=11;l<14;++l) edge(node(0,3,l),node(0,3,l+1));
+        for(const auto& pin:router.def_.nets()[i].pins) {
+            const bool top=pin.layer_idx>10;
+            auto choices=router.accesses(pin,top?11:1,top?20:9);old.accesses.push_back(choices.front());
+            old.nodes.insert(choices.front().node);
+        }
+        const auto& slot=router.policy_.slots()[old.slot];
+        for(int layer:{10,11}) {
+            auto choices=router.accesses(slot.point,layer,layer==10?1:11,layer==10?9:20);
+            old.accesses.push_back(choices.front());old.nodes.insert(choices.front().node);
+        }
+        router.encode(i,old);router.routes_.resize(router.def_.nets().size());router.routes_[i]=old;
+        router.account(i,old,1);router.initial_build_=false;router.complete_=true;router.validate_complete();router.best_metrics_=router.measure();
+        require(old.measured.wirelength>old.measured.reference,"detoured internal bridge lies above its native reference so shorter geometry can improve W: L="+
+                std::to_string(old.measured.wirelength)+", R="+std::to_string(old.measured.reference));
+        router.recovery_cell_cost_=true;router.present_=0;router.history_scale_=0;
+        const auto before=ledger(router);const auto baseline=router.best_metrics_;
+        require(router.recovery_subtree_candidates(i,old).empty(),"subtree mechanism is explicitly opt-in");
+        router.options_.v9_subtree_recovery=true;
+        std::optional<NetRoute> candidate;
+        require(router.recovery_transaction(i,[&](const NetRoute& source,const CompleteMetrics&)->std::optional<NetRoute> {
+            auto candidates=router.recovery_subtree_candidates(i,source);
+            require(!candidates.empty(),"non-leaf U-shaped internal bridge produces bounded multi-source candidates");
+            auto best=std::min_element(candidates.begin(),candidates.end(),[](const auto& a,const auto& b) {
+                return a.measured.wirelength<b.measured.wirelength;
+            });
+            candidate=*best;return candidate;
+        }),"internal two-subtree reconnect improves actual encoded Guide quality");
+        require(candidate.has_value() && candidate->recovery_subtree &&
+                candidate->measured.wirelength<old.measured.wirelength,"shorter result is identified as a subtree candidate");
+        require(router.counters_.v9_subtree_searches>0 && router.counters_.v9_subtree_candidates>0 &&
+                router.counters_.v9_subtree_accepted==1,"candidate/search/committed-subtree counters are separate");
+        require(router.routes_[i].slot==old.slot && router.routes_[i].measured.tsv_cells==old.measured.tsv_cells,
+                "subtree recovery preserves occupied TSV cell and network ownership");
+        near(router.routes_[i].measured.tsv_points.front().distance_to(old.measured.tsv_points.front()),0,"physical TSV point stays fixed");
+        near(router.best_metrics_.official.thermal_score,baseline.official.thermal_score,"fixed TSV subtree repair preserves thermal score");
+        parity(router,"accepted internal subtree repair");
+        std::vector<std::pair<size_t,NetRoute>> journal{{i,old}};auto checkpoint=baseline;
+        router.routes_[i].guides.front().x2=router.routes_[i].guides.front().x1;
+        require(!router.recovery_checkpoint(journal,checkpoint),"damaged subtree output triggers full checkpoint rollback");
+        require(ledger(router)==before && router.counters_.v9_subtree_accepted==0,
+                "checkpoint rollback restores route and removes reverted subtree accept count");
+        parity(router,"subtree checkpoint rollback");
+        const auto deadline=router.deadline_;
+        router.options_.unified_budget=true;router.deadline_=std::chrono::steady_clock::now()-std::chrono::seconds(1);
+        const auto attempts=router.counters_.v9_subtree_searches;
+        require(!router.recovery_transaction(i,[&](const auto& source,const auto&)->std::optional<NetRoute> {
+            const auto candidates=router.recovery_subtree_candidates(i,source);
+            require(candidates.empty(),"expired subtree deadline emits no candidate");return std::nullopt;
+        }),"expired subtree transaction is rejected");
+        require(ledger(router)==before && router.counters_.v9_subtree_searches==attempts,
+                "expired internal-tree work preserves complete incumbent without starting a search");
+        router.deadline_=deadline;parity(router,"subtree deadline rollback");
+    }
     static void branch_budgets(NegotiatedRouter& router,const ThermalParser& thermal) {
         const auto assignment=router.policy_.assign(router.def_.nets(),thermal);
         const size_t shared=index(router,"shared"),many=index(router,"many");NetRoute old;old.slot=assignment[shared];
@@ -241,6 +348,14 @@ struct PinLocalTestAccess {
         require(seeds.size()==8 && seeds==router.recovery_seeds(shared,old),"shared seed budget is at most eight and deterministic");
         require(std::count_if(seeds.begin(),seeds.end(),[](auto p){return p.first==0;})==4,"round-robin seeds preserve both die sides within the shared budget");
         for(auto [side,node]:seeds)require(router.graph_.legal_node(node) && (router.graph_.layer(node)>10)==bool(side),"shared branch seed is legal and on its declared die");
+        router.options_.v8_recovery=true;
+        const auto varied=router.recovery_seeds(shared,old);
+        for(int side=0;side<2;++side) {
+            std::set<int> layers,positions;
+            for(auto [die,node]:varied) if(die==side) {layers.insert(router.graph_.layer(node));positions.insert(router.graph_.row(node)*router.graph_.grid().cols+router.graph_.col(node));}
+            require(layers.size()>1&&positions.size()>1,"default V8 seeds include both trunk location and layer alternatives on each die");
+        }
+        router.options_.v8_recovery=false;
         router.options_.large_recovery_branches=3;require(router.recovery_seeds(shared,old).size()==3,"smaller explicit branch budget is respected");
         router.options_.large_recovery_branches=8;const auto crowded=router.build_candidate(many,-1,0);
         require(router.def_.nets()[many].pins.size()==17 && router.recovery_seeds(many,crowded).empty(),"more than sixteen terminals bypass global shared-seed enumeration");
@@ -268,6 +383,10 @@ int main(int argc,char** argv) {
         options.official_metrics.gcell_height_dbu=20;NegotiatedRouter cell(rectangular,lef,thermal,options);PinLocalTestAccess::cell_cost(cell);
         DefParser fanout;require(fanout.parse(write(folder/"fanout.def",fanout_design()),lef,DefGridMapping::OFFICIAL_FULL),"fanout budget fixture parses");
         NegotiatedRouter branches(fanout,lef,thermal,options);PinLocalTestAccess::branch_budgets(branches,thermal);
+        DefParser subtree_def;require(subtree_def.parse(write(folder/"subtree.def",subtree_design()),lef,DefGridMapping::OFFICIAL_FULL),"subtree fixture parses");
+        RouterOptions subtree_options=options;subtree_options.graph_options={RoutingGeometryMode::GLOBAL_GUIDE,false,true,false,true};
+        subtree_options.official_metrics.score_20261020=true;subtree_options.tsv_policy.resource_mode=TsvResourceMode::GLOBAL_GRID;
+        NegotiatedRouter subtrees(subtree_def,lef,thermal,subtree_options);PinLocalTestAccess::subtree(subtrees);
         std::cout<<"PASS budgeted recovery transactions, real Guide metrics, rollback/checkpoint, phase budgets, branch budgets and non-square cell cost: "<<checks<<" checks\n";
     } catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}
 }
